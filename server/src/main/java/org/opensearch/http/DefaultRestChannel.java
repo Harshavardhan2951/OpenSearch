@@ -87,7 +87,6 @@ class DefaultRestChannel extends AbstractRestChannel implements RestChannel {
 
     @Nullable
     private final HttpTracer tracerLog;
-
     DefaultRestChannel(
         HttpChannel httpChannel,
         HttpRequest httpRequest,
