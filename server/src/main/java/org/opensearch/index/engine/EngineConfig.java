@@ -33,6 +33,7 @@ package org.opensearch.index.engine;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.codecs.Codec;
+import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.search.QueryCache;
@@ -40,6 +41,7 @@ import org.apache.lucene.search.QueryCachingPolicy;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.similarities.Similarity;
+import org.opensearch.cluster.service.ClusterApplierService;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.settings.Setting;
@@ -112,6 +114,7 @@ public final class EngineConfig {
     private final BooleanSupplier startedPrimarySupplier;
     private final Comparator<LeafReader> leafSorter;
     private final Supplier<DocumentMapperForType> documentMapperForTypeSupplier;
+    private final ClusterApplierService clusterApplierService;
 
     /**
      * A supplier of the outstanding retention leases. This is used during merged operations to determine which operations that have been
@@ -248,6 +251,8 @@ public final class EngineConfig {
 
     private final TranslogFactory translogFactory;
 
+    private final IndexWriter.IndexReaderWarmer indexReaderWarmer;
+
     /**
      * Creates a new {@link org.opensearch.index.engine.EngineConfig}
      */
@@ -299,6 +304,8 @@ public final class EngineConfig {
         this.translogFactory = builder.translogFactory;
         this.leafSorter = builder.leafSorter;
         this.documentMapperForTypeSupplier = builder.documentMapperForTypeSupplier;
+        this.indexReaderWarmer = builder.indexReaderWarmer;
+        this.clusterApplierService = builder.clusterApplierService;
     }
 
     /**
@@ -308,6 +315,45 @@ public final class EngineConfig {
      */
     public void setEnableGcDeletes(boolean enableGcDeletes) {
         this.enableGcDeletes = enableGcDeletes;
+    }
+
+    /**
+     * Creates a new Builder pre-populated with all values from this EngineConfig.
+     * This allows for easy modification of specific fields while preserving all others.
+     *
+     * @return a new Builder instance with all current configuration values
+     */
+    public Builder toBuilder() {
+        return new Builder().shardId(this.shardId)
+            .threadPool(this.threadPool)
+            .indexSettings(this.indexSettings)
+            .warmer(this.warmer)
+            .store(this.store)
+            .mergePolicy(this.mergePolicy)
+            .analyzer(this.analyzer)
+            .similarity(this.similarity)
+            .codecService(this.codecService)
+            .eventListener(this.eventListener)
+            .queryCache(this.queryCache)
+            .queryCachingPolicy(this.queryCachingPolicy)
+            .translogConfig(this.translogConfig)
+            .translogDeletionPolicyFactory(this.translogDeletionPolicyFactory)
+            .flushMergesAfter(this.flushMergesAfter)
+            .externalRefreshListener(this.externalRefreshListener)
+            .internalRefreshListener(this.internalRefreshListener)
+            .indexSort(this.indexSort)
+            .circuitBreakerService(this.circuitBreakerService)
+            .globalCheckpointSupplier(this.globalCheckpointSupplier)
+            .retentionLeasesSupplier(this.retentionLeasesSupplier)
+            .primaryTermSupplier(this.primaryTermSupplier)
+            .tombstoneDocSupplier(this.tombstoneDocSupplier)
+            .readOnlyReplica(this.isReadOnlyReplica)
+            .startedPrimarySupplier(this.startedPrimarySupplier)
+            .translogFactory(this.translogFactory)
+            .leafSorter(this.leafSorter)
+            .documentMapperForTypeSupplier(this.documentMapperForTypeSupplier)
+            .indexReaderWarmer(this.indexReaderWarmer)
+            .clusterApplierService(this.clusterApplierService);
     }
 
     /**
@@ -524,6 +570,14 @@ public final class EngineConfig {
     }
 
     /**
+     * Returns the underlying indexReaderWarmer
+     * @return the indexReaderWarmer
+     */
+    public IndexWriter.IndexReaderWarmer getIndexReaderWarmer() {
+        return indexReaderWarmer;
+    }
+
+    /**
      * A supplier supplies tombstone documents which will be used in soft-update methods.
      * The returned document consists only _uid, _seqno, _term and _version fields; other metadata fields are excluded.
      *
@@ -565,10 +619,18 @@ public final class EngineConfig {
     }
 
     /**
+     * Returns the ClusterApplierService instance.
+     */
+    public ClusterApplierService getClusterApplierService() {
+        return this.clusterApplierService;
+    }
+
+    /**
      * Builder for EngineConfig class
      *
-     * @opensearch.internal
+     * @opensearch.api
      */
+    @PublicApi(since = "3.3.0")
     public static class Builder {
         private ShardId shardId;
         private ThreadPool threadPool;
@@ -598,6 +660,8 @@ public final class EngineConfig {
         private TranslogFactory translogFactory = new InternalTranslogFactory();
         private Supplier<DocumentMapperForType> documentMapperForTypeSupplier;
         Comparator<LeafReader> leafSorter;
+        private IndexWriter.IndexReaderWarmer indexReaderWarmer;
+        private ClusterApplierService clusterApplierService;
 
         public Builder shardId(ShardId shardId) {
             this.shardId = shardId;
@@ -736,6 +800,16 @@ public final class EngineConfig {
 
         public Builder leafSorter(Comparator<LeafReader> leafSorter) {
             this.leafSorter = leafSorter;
+            return this;
+        }
+
+        public Builder indexReaderWarmer(IndexWriter.IndexReaderWarmer indexReaderWarmer) {
+            this.indexReaderWarmer = indexReaderWarmer;
+            return this;
+        }
+
+        public Builder clusterApplierService(ClusterApplierService clusterApplierService) {
+            this.clusterApplierService = clusterApplierService;
             return this;
         }
 

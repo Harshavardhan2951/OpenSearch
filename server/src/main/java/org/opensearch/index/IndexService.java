@@ -48,6 +48,7 @@ import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.CheckedFunction;
 import org.opensearch.common.Nullable;
+import org.opensearch.common.annotation.InternalApi;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Setting.Property;
@@ -76,6 +77,7 @@ import org.opensearch.index.compositeindex.CompositeIndexSettings;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfigFactory;
 import org.opensearch.index.engine.EngineFactory;
+import org.opensearch.index.engine.MergedSegmentWarmerFactory;
 import org.opensearch.index.fielddata.IndexFieldDataCache;
 import org.opensearch.index.fielddata.IndexFieldDataService;
 import org.opensearch.index.mapper.MapperService;
@@ -92,7 +94,6 @@ import org.opensearch.index.shard.ShardNotFoundException;
 import org.opensearch.index.shard.ShardNotInPrimaryModeException;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.similarity.SimilarityService;
-import org.opensearch.index.store.CompositeDirectory;
 import org.opensearch.index.store.RemoteSegmentStoreDirectoryFactory;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.store.remote.filecache.FileCache;
@@ -104,6 +105,8 @@ import org.opensearch.indices.fielddata.cache.IndicesFieldDataCache;
 import org.opensearch.indices.mapper.MapperRegistry;
 import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.recovery.RecoveryState;
+import org.opensearch.indices.replication.checkpoint.MergedSegmentPublisher;
+import org.opensearch.indices.replication.checkpoint.ReferencedSegmentsPublisher;
 import org.opensearch.indices.replication.checkpoint.SegmentReplicationCheckpointPublisher;
 import org.opensearch.node.remotestore.RemoteStoreNodeAttribute;
 import org.opensearch.plugins.IndexStorePlugin;
@@ -136,7 +139,6 @@ import java.util.function.Supplier;
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.unmodifiableMap;
 import static org.opensearch.common.collect.MapBuilder.newMapBuilder;
-import static org.opensearch.common.util.FeatureFlags.READER_WRITER_SPLIT_EXPERIMENTAL_SETTING;
 import static org.opensearch.index.remote.RemoteMigrationIndexMetadataUpdater.indexHasRemoteStoreSettings;
 
 /**
@@ -153,6 +155,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private final NodeEnvironment nodeEnv;
     private final ShardStoreDeleter shardStoreDeleter;
     private final IndexStorePlugin.DirectoryFactory directoryFactory;
+    private final IndexStorePlugin.CompositeDirectoryFactory compositeDirectoryFactory;
     private final IndexStorePlugin.DirectoryFactory remoteDirectoryFactory;
     private final IndexStorePlugin.RecoveryStateFactory recoveryStateFactory;
     private final CheckedFunction<DirectoryReader, DirectoryReader, IOException> readerWrapper;
@@ -176,6 +179,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private volatile AsyncGlobalCheckpointTask globalCheckpointTask;
     private volatile AsyncRetentionLeaseSyncTask retentionLeaseSyncTask;
     private volatile AsyncReplicationTask asyncReplicationTask;
+    private volatile AsyncPublishReferencedSegmentsTask asyncPublishReferencedSegmentsTask;
 
     // don't convert to Setting<> and register... we only set this in tests and register via a plugin
     private final String INDEX_TRANSLOG_RETENTION_CHECK_INTERVAL_SETTING = "index.translog.retention.check_interval";
@@ -199,7 +203,11 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private final CompositeIndexSettings compositeIndexSettings;
     private final Consumer<IndexShard> replicator;
     private final Function<ShardId, ReplicationStats> segmentReplicationStatsProvider;
+    private final Object refreshMutex = new Object();
+    private volatile TimeValue refreshInterval;
+    private volatile boolean shardLevelRefreshEnabled;
 
+    @InternalApi
     public IndexService(
         IndexSettings indexSettings,
         IndexCreationContext indexCreationContext,
@@ -218,6 +226,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         Client client,
         QueryCache queryCache,
         IndexStorePlugin.DirectoryFactory directoryFactory,
+        IndexStorePlugin.CompositeDirectoryFactory compositeDirectoryFactory,
         IndexStorePlugin.DirectoryFactory remoteDirectoryFactory,
         IndexEventListener eventListener,
         Function<IndexService, CheckedFunction<DirectoryReader, DirectoryReader, IOException>> wrapperFactory,
@@ -234,12 +243,14 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         BiFunction<IndexSettings, ShardRouting, TranslogFactory> translogFactorySupplier,
         Supplier<TimeValue> clusterDefaultRefreshIntervalSupplier,
         Supplier<Boolean> fixedRefreshIntervalSchedulingEnabled,
+        boolean shardLevelRefreshEnabled,
         RecoverySettings recoverySettings,
         RemoteStoreSettings remoteStoreSettings,
         FileCache fileCache,
         CompositeIndexSettings compositeIndexSettings,
         Consumer<IndexShard> replicator,
-        Function<ShardId, ReplicationStats> segmentReplicationStatsProvider
+        Function<ShardId, ReplicationStats> segmentReplicationStatsProvider,
+        Supplier<Integer> clusterDefaultMaxMergeAtOnceSupplier
     ) {
         super(indexSettings);
         this.allowExpensiveQueries = allowExpensiveQueries;
@@ -263,7 +274,13 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 idFieldDataEnabled,
                 scriptService
             );
-            this.indexFieldData = new IndexFieldDataService(indexSettings, indicesFieldDataCache, circuitBreakerService, mapperService);
+            this.indexFieldData = new IndexFieldDataService(
+                indexSettings,
+                indicesFieldDataCache,
+                circuitBreakerService,
+                mapperService,
+                threadPool
+            );
             if (indexSettings.getIndexSortConfig().hasIndexSort()) {
                 // we delay the actual creation of the sort order for this index because the mapping has not been merged yet.
                 // The sort order is validated right after the merge of the mapping later in the process.
@@ -300,6 +317,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         this.eventListener = eventListener;
         this.nodeEnv = nodeEnv;
         this.directoryFactory = directoryFactory;
+        this.compositeDirectoryFactory = compositeDirectoryFactory;
         this.remoteDirectoryFactory = remoteDirectoryFactory;
         this.recoveryStateFactory = recoveryStateFactory;
         this.engineFactory = Objects.requireNonNull(engineFactory);
@@ -310,16 +328,18 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         this.indexingOperationListeners = Collections.unmodifiableList(indexingOperationListeners);
         this.clusterDefaultRefreshIntervalSupplier = clusterDefaultRefreshIntervalSupplier;
         this.fixedRefreshIntervalSchedulingEnabled = fixedRefreshIntervalSchedulingEnabled;
+        this.shardLevelRefreshEnabled = shardLevelRefreshEnabled;
+        this.refreshInterval = getRefreshInterval();
         // kick off async ops for the first shard in this index
-        this.refreshTask = new AsyncRefreshTask(this);
         this.trimTranslogTask = new AsyncTrimTranslogTask(this);
         // disable these checks for ingestion source engine
         if (!indexSettings.getIndexMetadata().useIngestionSource()) {
             this.globalCheckpointTask = new AsyncGlobalCheckpointTask(this);
             this.retentionLeaseSyncTask = new AsyncRetentionLeaseSyncTask(this);
         }
-        if (READER_WRITER_SPLIT_EXPERIMENTAL_SETTING.get(indexSettings.getNodeSettings())) {
-            this.asyncReplicationTask = new AsyncReplicationTask(this);
+        this.asyncReplicationTask = new AsyncReplicationTask(this);
+        if (FeatureFlags.isEnabled(FeatureFlags.MERGED_SEGMENT_WARMER_EXPERIMENTAL_SETTING)) {
+            this.asyncPublishReferencedSegmentsTask = new AsyncPublishReferencedSegmentsTask(this);
         }
         this.translogFactorySupplier = translogFactorySupplier;
         this.recoverySettings = recoverySettings;
@@ -328,9 +348,17 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         this.fileCache = fileCache;
         this.replicator = replicator;
         this.segmentReplicationStatsProvider = segmentReplicationStatsProvider;
+        indexSettings.setDefaultMaxMergesAtOnce(clusterDefaultMaxMergeAtOnceSupplier.get());
         updateFsyncTaskIfNecessary();
+        synchronized (refreshMutex) {
+            if (shardLevelRefreshEnabled == false) {
+                logger.debug("shard level refresh is disabled for index [{}]", indexSettings.getIndex().getName());
+                startIndexLevelRefreshTask();
+            }
+        }
     }
 
+    @InternalApi
     public IndexService(
         IndexSettings indexSettings,
         IndexCreationContext indexCreationContext,
@@ -365,8 +393,10 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         BiFunction<IndexSettings, ShardRouting, TranslogFactory> translogFactorySupplier,
         Supplier<TimeValue> clusterDefaultRefreshIntervalSupplier,
         Supplier<Boolean> fixedRefreshIntervalSchedulingEnabled,
+        boolean shardLevelRefreshEnabled,
         RecoverySettings recoverySettings,
-        RemoteStoreSettings remoteStoreSettings
+        RemoteStoreSettings remoteStoreSettings,
+        Supplier<Integer> clusterDefaultMaxMergeAtOnce
     ) {
         this(
             indexSettings,
@@ -386,6 +416,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             client,
             queryCache,
             directoryFactory,
+            null,
             remoteDirectoryFactory,
             eventListener,
             wrapperFactory,
@@ -402,12 +433,14 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             translogFactorySupplier,
             clusterDefaultRefreshIntervalSupplier,
             fixedRefreshIntervalSchedulingEnabled,
+            shardLevelRefreshEnabled,
             recoverySettings,
             remoteStoreSettings,
             null,
             null,
             s -> {},
-            (shardId) -> ReplicationStats.empty()
+            (shardId) -> ReplicationStats.empty(),
+            clusterDefaultMaxMergeAtOnce
         );
     }
 
@@ -419,6 +452,11 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     // visible for tests
     AsyncReplicationTask getReplicationTask() {
         return asyncReplicationTask;
+    }
+
+    // visible for tests
+    AsyncPublishReferencedSegmentsTask getPublishReferencedSegmentsTask() {
+        return asyncPublishReferencedSegmentsTask;
     }
 
     /**
@@ -568,6 +606,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         }
     }
 
+    @Deprecated(forRemoval = true)
     public synchronized IndexShard createShard(
         final ShardRouting routing,
         final Consumer<ShardId> globalCheckpointSyncer,
@@ -577,7 +616,38 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         final RepositoriesService repositoriesService,
         final DiscoveryNode targetNode,
         @Nullable DiscoveryNode sourceNode,
-        DiscoveryNodes discoveryNodes
+        DiscoveryNodes discoveryNodes,
+        MergedSegmentWarmerFactory mergedSegmentWarmerFactory
+    ) throws IOException {
+        return createShard(
+            routing,
+            globalCheckpointSyncer,
+            retentionLeaseSyncer,
+            checkpointPublisher,
+            remoteStoreStatsTrackerFactory,
+            repositoriesService,
+            targetNode,
+            sourceNode,
+            discoveryNodes,
+            mergedSegmentWarmerFactory,
+            null,
+            null
+        );
+    }
+
+    public synchronized IndexShard createShard(
+        final ShardRouting routing,
+        final Consumer<ShardId> globalCheckpointSyncer,
+        final RetentionLeaseSyncer retentionLeaseSyncer,
+        final SegmentReplicationCheckpointPublisher checkpointPublisher,
+        final RemoteStoreStatsTrackerFactory remoteStoreStatsTrackerFactory,
+        final RepositoriesService repositoriesService,
+        final DiscoveryNode targetNode,
+        @Nullable DiscoveryNode sourceNode,
+        DiscoveryNodes discoveryNodes,
+        MergedSegmentWarmerFactory mergedSegmentWarmerFactory,
+        MergedSegmentPublisher mergedSegmentPublisher,
+        ReferencedSegmentsPublisher referencedSegmentsPublisher
     ) throws IOException {
         Objects.requireNonNull(retentionLeaseSyncer);
         /*
@@ -609,7 +679,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             Store remoteStore = null;
             Directory remoteDirectory = null;
             boolean seedRemote = false;
-            if (targetNode.isRemoteStoreNode()) {
+            if (targetNode.isRemoteSegmentStoreNode()) {
                 if (this.indexSettings.isRemoteStoreEnabled()) {
                     remoteDirectory = remoteDirectoryFactory.newDirectory(this.indexSettings, path);
                 } else {
@@ -625,7 +695,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                         RemoteStoreNodeAttribute.getRemoteStoreSegmentRepo(this.indexSettings.getNodeSettings()),
                         this.indexSettings.getUUID(),
                         shardId,
-                        this.indexSettings.getRemoteStorePathStrategy()
+                        this.indexSettings.getRemoteStorePathStrategy(),
+                        this.indexSettings.getRemoteStoreSegmentPathPrefix()
                     );
                 }
                 // When an instance of Store is created, a shardlock is created which is released on closing the instance of store.
@@ -660,8 +731,14 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             if (FeatureFlags.isEnabled(FeatureFlags.WRITABLE_WARM_INDEX_SETTING) &&
             // TODO : Need to remove this check after support for hot indices is added in Composite Directory
                 this.indexSettings.isWarmIndex()) {
-                Directory localDirectory = directoryFactory.newDirectory(this.indexSettings, path);
-                directory = new CompositeDirectory(localDirectory, remoteDirectory, fileCache);
+                directory = compositeDirectoryFactory.newDirectory(
+                    this.indexSettings,
+                    path,
+                    directoryFactory,
+                    remoteDirectory,
+                    fileCache,
+                    threadPool
+                );
             } else {
                 directory = directoryFactory.newDirectory(this.indexSettings, path);
             }
@@ -704,7 +781,15 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 remoteStoreSettings,
                 seedRemote,
                 discoveryNodes,
-                segmentReplicationStatsProvider
+                segmentReplicationStatsProvider,
+                mergedSegmentWarmerFactory,
+                shardLevelRefreshEnabled,
+                fixedRefreshIntervalSchedulingEnabled,
+                this::getRefreshInterval,
+                refreshMutex,
+                clusterService.getClusterApplierService(),
+                this.indexSettings.isSegRepEnabledOrRemoteNode() ? mergedSegmentPublisher : null,
+                this.indexSettings.isSegRepEnabledOrRemoteNode() ? referencedSegmentsPublisher : null
             );
             eventListener.indexShardStateChanged(indexShard, null, indexShard.state(), "shard created");
             eventListener.afterIndexShardCreated(indexShard);
@@ -1110,8 +1195,9 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             }
             onRefreshIntervalChange();
             updateFsyncTaskIfNecessary();
-            if (READER_WRITER_SPLIT_EXPERIMENTAL_SETTING.get(indexSettings.getNodeSettings())) {
-                updateReplicationTask();
+            updateReplicationTask();
+            if (FeatureFlags.isEnabled(FeatureFlags.MERGED_SEGMENT_WARMER_EXPERIMENTAL_SETTING)) {
+                updatePublishReferencedSegmentsTask();
             }
         }
 
@@ -1126,6 +1212,24 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         }
     }
 
+    private void updatePublishReferencedSegmentsTask() {
+        if (getIndexSettings().getPublishReferencedSegmentsInterval().equals(asyncPublishReferencedSegmentsTask.getInterval())) {
+            return;
+        }
+        try {
+            asyncPublishReferencedSegmentsTask.close();
+        } finally {
+            asyncPublishReferencedSegmentsTask = new AsyncPublishReferencedSegmentsTask(this);
+        }
+    }
+
+    /**
+     * Called whenever the cluster level {@code cluster.default.index.max_merge_at_once} changes.
+     */
+    public void onDefaultMaxMergeAtOnceChanged(int newDefaultMaxMergeAtOnce) {
+        indexSettings.setDefaultMaxMergesAtOnce(newDefaultMaxMergeAtOnce);
+    }
+
     /**
      * Called whenever the refresh interval changes. This can happen in 2 cases -
      * 1. {@code cluster.default.index.refresh_interval} cluster setting changes. The change would only happen for
@@ -1133,9 +1237,10 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
      * 2. {@code index.refresh_interval} index setting changes.
      */
     public void onRefreshIntervalChange() {
-        if (refreshTask.getInterval().equals(getRefreshInterval())) {
+        if (refreshInterval.equals(getRefreshInterval())) {
             return;
         }
+        refreshInterval = getRefreshInterval();
         // once we change the refresh interval we schedule yet another refresh
         // to ensure we are in a clean and predictable state.
         // it doesn't matter if we move from or to <code>-1</code> in both cases we want
@@ -1177,10 +1282,20 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     }
 
     private void rescheduleRefreshTasks() {
-        try {
-            refreshTask.close();
-        } finally {
-            refreshTask = new AsyncRefreshTask(this);
+        synchronized (refreshMutex) {
+            if (shardLevelRefreshEnabled) {
+                try {
+                    stopShardLevelRefreshTasks();
+                } finally {
+                    startShardLevelRefreshTasks();
+                }
+            } else {
+                try {
+                    stopIndexLevelRefreshTask();
+                } finally {
+                    startIndexLevelRefreshTask();
+                }
+            }
         }
     }
 
@@ -1435,6 +1550,52 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         }
     }
 
+    /**
+     * Publish primary shard referenced segments in a defined interval.
+     *
+     * @opensearch.internal
+     */
+    final class AsyncPublishReferencedSegmentsTask extends BaseAsyncTask {
+
+        AsyncPublishReferencedSegmentsTask(IndexService indexService) {
+            super(indexService, indexService.getIndexSettings().getPublishReferencedSegmentsInterval());
+        }
+
+        @Override
+        protected void runInternal() {
+            indexService.maybePublishReferencedSegments();
+        }
+
+        @Override
+        protected String getThreadPool() {
+            return ThreadPool.Names.GENERIC;
+        }
+
+        @Override
+        public String toString() {
+            return "publish_primary_referenced_segments";
+        }
+
+        @Override
+        protected boolean mustReschedule() {
+            return indexSettings.isSegRepEnabledOrRemoteNode() && super.mustReschedule();
+        }
+    }
+
+    private void maybePublishReferencedSegments() {
+        for (IndexShard shard : this.shards.values()) {
+            try {
+                // Only the primary shard publish referenced segments.
+                // The replicas cleans up the redundant pending merge segments according to the primary shard request.
+                if (shard.isPrimaryMode() && shard.routingEntry().active()) {
+                    shard.publishReferencedSegments();
+                }
+            } catch (IOException ex) {
+                logger.warn(() -> new ParameterizedMessage("failed to publish primary referenced segments"), ex);
+            }
+        }
+    }
+
     final class AsyncTrimTranslogTask extends BaseAsyncTask {
 
         AsyncTrimTranslogTask(IndexService indexService) {
@@ -1584,4 +1745,69 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         return clearedAtLeastOne;
     }
 
+    /**
+     * This method is called when the refresh level is changed from index level to shard level or vice versa.
+     */
+    public void onRefreshLevelChange(boolean newShardLevelRefreshVal) {
+        synchronized (refreshMutex) {
+            if (this.shardLevelRefreshEnabled != newShardLevelRefreshVal) {
+                boolean prevShardLevelRefreshVal = this.shardLevelRefreshEnabled;
+                this.shardLevelRefreshEnabled = newShardLevelRefreshVal;
+                // The refresh mode has changed from index level to shard level and vice versa
+                logger.info("refresh tasks rescheduled oldVal={} newVal={}", prevShardLevelRefreshVal, newShardLevelRefreshVal);
+                if (newShardLevelRefreshVal) {
+                    try {
+                        stopIndexLevelRefreshTask();
+                    } finally {
+                        startShardLevelRefreshTasks();
+                    }
+                } else {
+                    try {
+                        stopShardLevelRefreshTasks();
+                    } finally {
+                        startIndexLevelRefreshTask();
+                    }
+                }
+            }
+        }
+    }
+
+    private void stopIndexLevelRefreshTask() {
+        assert Thread.holdsLock(refreshMutex);
+        // The refresh task is expected to be non-null at this point.
+        assert Objects.nonNull(refreshTask);
+        refreshTask.close();
+        refreshTask = null;
+    }
+
+    private void startShardLevelRefreshTasks() {
+        assert Thread.holdsLock(refreshMutex);
+        for (IndexShard shard : this.shards.values()) {
+            shard.startRefreshTask();
+        }
+    }
+
+    private void stopShardLevelRefreshTasks() {
+        assert Thread.holdsLock(refreshMutex);
+        for (IndexShard shard : this.shards.values()) {
+            shard.stopRefreshTask();
+        }
+    }
+
+    private void startIndexLevelRefreshTask() {
+        assert Thread.holdsLock(refreshMutex);
+        // The refresh task is expected to be null at this point.
+        assert Objects.isNull(refreshTask);
+        refreshTask = new AsyncRefreshTask(this);
+    }
+
+    // Visible for testing
+    boolean isShardLevelRefreshEnabled() {
+        return shardLevelRefreshEnabled;
+    }
+
+    // Visible for testing
+    public Object getRefreshMutex() {
+        return refreshMutex;
+    }
 }

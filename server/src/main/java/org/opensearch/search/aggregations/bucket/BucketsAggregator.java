@@ -72,7 +72,7 @@ public abstract class BucketsAggregator extends AggregatorBase {
 
     private final BigArrays bigArrays;
     private final IntConsumer multiBucketConsumer;
-    private LongArray docCounts;
+    protected LongArray docCounts;
     protected final DocCountProvider docCountProvider;
 
     public BucketsAggregator(
@@ -235,9 +235,11 @@ public abstract class BucketsAggregator extends AggregatorBase {
      *         array of ordinals
      */
     protected final InternalAggregations[] buildSubAggsForBuckets(long[] bucketOrdsToCollect) throws IOException {
+        checkCancelled();
         beforeBuildingBuckets(bucketOrdsToCollect);
         InternalAggregation[][] aggregations = new InternalAggregation[subAggregators.length][];
         for (int i = 0; i < subAggregators.length; i++) {
+            checkCancelled();
             aggregations[i] = subAggregators[i].buildAggregations(bucketOrdsToCollect);
         }
         InternalAggregations[] result = new InternalAggregations[bucketOrdsToCollect.length];
@@ -323,6 +325,7 @@ public abstract class BucketsAggregator extends AggregatorBase {
         BucketBuilderForFixedCount<B> bucketBuilder,
         Function<List<B>, InternalAggregation> resultBuilder
     ) throws IOException {
+        checkCancelled();
         int totalBuckets = owningBucketOrds.length * bucketsPerOwningBucketOrd;
         long[] bucketOrdsToCollect = new long[totalBuckets];
         int bucketOrdIdx = 0;
@@ -373,6 +376,7 @@ public abstract class BucketsAggregator extends AggregatorBase {
          * `consumeBucketsAndMaybeBreak(owningBucketOrds.length)`
          * here but we don't because single bucket aggs never have.
          */
+        checkCancelled();
         InternalAggregations[] subAggregationResults = buildSubAggsForBuckets(owningBucketOrds);
         InternalAggregation[] results = new InternalAggregation[owningBucketOrds.length];
         for (int ordIdx = 0; ordIdx < owningBucketOrds.length; ordIdx++) {
@@ -403,6 +407,7 @@ public abstract class BucketsAggregator extends AggregatorBase {
         BucketBuilderForVariable<B> bucketBuilder,
         ResultBuilderForVariable<B> resultBuilder
     ) throws IOException {
+        checkCancelled();
         long totalOrdsToCollect = 0;
         for (int ordIdx = 0; ordIdx < owningBucketOrds.length; ordIdx++) {
             totalOrdsToCollect += bucketOrds.bucketsInOrd(owningBucketOrds[ordIdx]);
@@ -516,4 +521,7 @@ public abstract class BucketsAggregator extends AggregatorBase {
         return false;
     }
 
+    public void doReset() {
+        docCounts.fill(0, docCounts.size(), 0);
+    }
 }

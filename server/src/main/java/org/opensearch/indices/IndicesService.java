@@ -61,6 +61,7 @@ import org.opensearch.common.CheckedConsumer;
 import org.opensearch.common.CheckedFunction;
 import org.opensearch.common.CheckedSupplier;
 import org.opensearch.common.Nullable;
+import org.opensearch.common.annotation.InternalApi;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.cache.policy.CachedQueryResult;
 import org.opensearch.common.cache.service.CacheService;
@@ -114,6 +115,7 @@ import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineConfigFactory;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.engine.InternalEngineFactory;
+import org.opensearch.index.engine.MergedSegmentWarmerFactory;
 import org.opensearch.index.engine.NRTReplicationEngineFactory;
 import org.opensearch.index.engine.NoOpEngine;
 import org.opensearch.index.engine.ReadOnlyEngine;
@@ -154,6 +156,8 @@ import org.opensearch.indices.recovery.PeerRecoveryTargetService;
 import org.opensearch.indices.recovery.RecoveryListener;
 import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.recovery.RecoveryState;
+import org.opensearch.indices.replication.checkpoint.MergedSegmentPublisher;
+import org.opensearch.indices.replication.checkpoint.ReferencedSegmentsPublisher;
 import org.opensearch.indices.replication.checkpoint.SegmentReplicationCheckpointPublisher;
 import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.node.Node;
@@ -209,9 +213,10 @@ import static org.opensearch.common.util.concurrent.OpenSearchExecutors.daemonTh
 import static org.opensearch.core.common.util.CollectionUtils.arrayAsArrayList;
 import static org.opensearch.index.IndexService.IndexCreationContext.CREATE_INDEX;
 import static org.opensearch.index.IndexService.IndexCreationContext.METADATA_VERIFICATION;
+import static org.opensearch.index.TieredMergePolicyProvider.DEFAULT_MAX_MERGE_AT_ONCE;
+import static org.opensearch.index.TieredMergePolicyProvider.MIN_DEFAULT_MAX_MERGE_AT_ONCE;
 import static org.opensearch.index.query.AbstractQueryBuilder.parseInnerQueryBuilder;
 import static org.opensearch.indices.IndicesRequestCache.INDICES_REQUEST_CACHE_MAX_SIZE_ALLOWED_IN_CACHE_SETTING;
-import static org.opensearch.node.remotestore.RemoteStoreNodeAttribute.isRemoteDataAttributePresent;
 import static org.opensearch.search.SearchService.ALLOW_EXPENSIVE_QUERIES;
 
 /**
@@ -276,6 +281,21 @@ public class IndicesService extends AbstractLifecycleComponent
     );
 
     /**
+     * This setting is used to set the maxMergeAtOnce parameter for {@code TieredMergePolicy}
+     * when the {@code index.merge.policy.max_merge_at_once} index setting is not provided during index creation
+     * or when the existing {@code index.merge.policy.max_merge_at_once} index setting is set as null.
+     * This comes handy when the user wants to change the maxMergeAtOnce across all indexes created in a cluster
+     * which is different from the default.
+     */
+    public static final Setting<Integer> CLUSTER_DEFAULT_INDEX_MAX_MERGE_AT_ONCE_SETTING = Setting.intSetting(
+        "cluster.default.index.max_merge_at_once",
+        DEFAULT_MAX_MERGE_AT_ONCE,
+        MIN_DEFAULT_MAX_MERGE_AT_ONCE,
+        Property.NodeScope,
+        Property.Dynamic
+    );
+
+    /**
      * This setting is used to set the minimum refresh interval applicable for all indexes in a cluster. The
      * {@code cluster.default.index.refresh_interval} setting value needs to be higher than this setting's value. Index
      * creation will fail if the index setting {@code index.refresh_interval} is supplied with a value lower than the
@@ -296,6 +316,17 @@ public class IndicesService extends AbstractLifecycleComponent
      */
     public static final Setting<Boolean> CLUSTER_REFRESH_FIXED_INTERVAL_SCHEDULE_ENABLED_SETTING = Setting.boolSetting(
         "cluster.index.refresh.fixed_interval_scheduling.enabled",
+        false,
+        Property.NodeScope,
+        Property.Dynamic
+    );
+
+    /**
+     * This setting is used to enable fixed interval scheduling capability for refresh tasks to ensure consistent intervals
+     * between refreshes.
+     */
+    public static final Setting<Boolean> CLUSTER_REFRESH_SHARD_LEVEL_ENABLED_SETTING = Setting.boolSetting(
+        "cluster.index.refresh.shard_level.enabled",
         false,
         Property.NodeScope,
         Property.Dynamic
@@ -358,6 +389,7 @@ public class IndicesService extends AbstractLifecycleComponent
     private final MetaStateService metaStateService;
     private final Collection<Function<IndexSettings, Optional<EngineFactory>>> engineFactoryProviders;
     private final Map<String, IndexStorePlugin.DirectoryFactory> directoryFactories;
+    private final Map<String, IndexStorePlugin.CompositeDirectoryFactory> compositeDirectoryFactories;
     private final Map<String, IngestionConsumerFactory> ingestionConsumerFactories;
     private final Map<String, IndexStorePlugin.RecoveryStateFactory> recoveryStateFactories;
     final AbstractRefCounted indicesRefCount; // pkg-private for testing
@@ -375,12 +407,14 @@ public class IndicesService extends AbstractLifecycleComponent
     private final BiFunction<IndexSettings, ShardRouting, TranslogFactory> translogFactorySupplier;
     private volatile TimeValue clusterDefaultRefreshInterval;
     private volatile boolean fixedRefreshIntervalSchedulingEnabled;
+    private volatile boolean shardLevelRefreshEnabled;
     private final SearchRequestStats searchRequestStats;
     private final FileCache fileCache;
     private final CompositeIndexSettings compositeIndexSettings;
     private final Consumer<IndexShard> replicator;
     private final Function<ShardId, ReplicationStats> segmentReplicationStatsProvider;
     private volatile int maxSizeInRequestCache;
+    private volatile int defaultMaxMergeAtOnce;
 
     @Override
     protected void doStart() {
@@ -388,6 +422,7 @@ public class IndicesService extends AbstractLifecycleComponent
         threadPool.schedule(this.cacheCleaner, this.cleanInterval, ThreadPool.Names.SAME);
     }
 
+    @InternalApi
     public IndicesService(
         Settings settings,
         PluginsService pluginsService,
@@ -407,6 +442,7 @@ public class IndicesService extends AbstractLifecycleComponent
         MetaStateService metaStateService,
         Collection<Function<IndexSettings, Optional<EngineFactory>>> engineFactoryProviders,
         Map<String, IndexStorePlugin.DirectoryFactory> directoryFactories,
+        Map<String, IndexStorePlugin.CompositeDirectoryFactory> compositeDirectoryFactories,
         ValuesSourceRegistry valuesSourceRegistry,
         Map<String, IndexStorePlugin.RecoveryStateFactory> recoveryStateFactories,
         IndexStorePlugin.DirectoryFactory remoteDirectoryFactory,
@@ -471,6 +507,7 @@ public class IndicesService extends AbstractLifecycleComponent
         this.engineFactoryProviders = engineFactoryProviders;
 
         this.directoryFactories = directoryFactories;
+        this.compositeDirectoryFactories = compositeDirectoryFactories;
         this.recoveryStateFactories = recoveryStateFactories;
         this.ingestionConsumerFactories = ingestionConsumerFactories;
         // doClose() is called when shutting down a node, yet there might still be ongoing requests
@@ -534,6 +571,9 @@ public class IndicesService extends AbstractLifecycleComponent
                 CLUSTER_REFRESH_FIXED_INTERVAL_SCHEDULE_ENABLED_SETTING,
                 this::setFixedRefreshIntervalSchedulingEnabled
             );
+        this.shardLevelRefreshEnabled = CLUSTER_REFRESH_SHARD_LEVEL_ENABLED_SETTING.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(CLUSTER_REFRESH_SHARD_LEVEL_ENABLED_SETTING, this::onRefreshLevelChange);
 
         this.recoverySettings = recoverySettings;
         this.remoteStoreSettings = remoteStoreSettings;
@@ -544,8 +584,13 @@ public class IndicesService extends AbstractLifecycleComponent
         this.maxSizeInRequestCache = INDICES_REQUEST_CACHE_MAX_SIZE_ALLOWED_IN_CACHE_SETTING.get(clusterService.getSettings());
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(INDICES_REQUEST_CACHE_MAX_SIZE_ALLOWED_IN_CACHE_SETTING, this::setMaxSizeInRequestCache);
+
+        this.defaultMaxMergeAtOnce = CLUSTER_DEFAULT_INDEX_MAX_MERGE_AT_ONCE_SETTING.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(CLUSTER_DEFAULT_INDEX_MAX_MERGE_AT_ONCE_SETTING, this::onDefaultMaxMergeAtOnceUpdate);
     }
 
+    @InternalApi
     public IndicesService(
         Settings settings,
         PluginsService pluginsService,
@@ -595,6 +640,7 @@ public class IndicesService extends AbstractLifecycleComponent
             metaStateService,
             engineFactoryProviders,
             directoryFactories,
+            Collections.emptyMap(),
             valuesSourceRegistry,
             recoveryStateFactories,
             remoteDirectoryFactory,
@@ -628,6 +674,22 @@ public class IndicesService extends AbstractLifecycleComponent
         }
     }
 
+    /**
+     * The changes to dynamic cluster setting {@code cluster.default.index.max_merge_at_once} needs to be updated. This
+     * method gets called whenever the setting changes. We set the instance variable with the updated value as this is
+     * also a supplier to all IndexService that have been created on the node. We also notify the change to all
+     * IndexService instances that are created on this node.
+     *
+     * @param newDefaultMaxMergeAtOnce the updated cluster default maxMergeAtOnce.
+     */
+    private void onDefaultMaxMergeAtOnceUpdate(int newDefaultMaxMergeAtOnce) {
+        this.defaultMaxMergeAtOnce = newDefaultMaxMergeAtOnce; // do we need this?
+        for (Map.Entry<String, IndexService> entry : indices.entrySet()) {
+            IndexService indexService = entry.getValue();
+            indexService.onDefaultMaxMergeAtOnceChanged(newDefaultMaxMergeAtOnce);
+        }
+    }
+
     private static BiFunction<IndexSettings, ShardRouting, TranslogFactory> getTranslogFactorySupplier(
         Supplier<RepositoriesService> repositoriesServiceSupplier,
         ThreadPool threadPool,
@@ -644,7 +706,7 @@ public class IndicesService extends AbstractLifecycleComponent
                     remoteStoreStatsTrackerFactory.getRemoteTranslogTransferTracker(shardRouting.shardId()),
                     remoteStoreSettings
                 );
-            } else if (isRemoteDataAttributePresent(settings) && shardRouting.primary()) {
+            } else if (RemoteStoreNodeAttribute.isTranslogRepoConfigured(settings) && shardRouting.primary()) {
                 return new RemoteBlobStoreInternalTranslogFactory(
                     repositoriesServiceSupplier,
                     threadPool,
@@ -994,6 +1056,7 @@ public class IndicesService extends AbstractLifecycleComponent
             getEngineFactory(idxSettings),
             getEngineConfigFactory(idxSettings),
             directoryFactories,
+            compositeDirectoryFactories,
             () -> allowExpensiveQueries,
             indexNameExpressionResolver,
             recoveryStateFactories,
@@ -1028,10 +1091,12 @@ public class IndicesService extends AbstractLifecycleComponent
             translogFactorySupplier,
             this::getClusterDefaultRefreshInterval,
             this::isFixedRefreshIntervalSchedulingEnabled,
+            this::isShardLevelRefreshEnabled,
             this.recoverySettings,
             this.remoteStoreSettings,
             replicator,
-            segmentReplicationStatsProvider
+            segmentReplicationStatsProvider,
+            this::getClusterDefaultMaxMergeAtOnce
         );
     }
 
@@ -1110,6 +1175,7 @@ public class IndicesService extends AbstractLifecycleComponent
             getEngineFactory(idxSettings),
             getEngineConfigFactory(idxSettings),
             directoryFactories,
+            compositeDirectoryFactories,
             () -> allowExpensiveQueries,
             indexNameExpressionResolver,
             recoveryStateFactories,
@@ -1153,6 +1219,41 @@ public class IndicesService extends AbstractLifecycleComponent
         }
     }
 
+    @Deprecated(forRemoval = true)
+    public IndexShard createShard(
+        final ShardRouting shardRouting,
+        final SegmentReplicationCheckpointPublisher checkpointPublisher,
+        final PeerRecoveryTargetService recoveryTargetService,
+        final RecoveryListener recoveryListener,
+        final RepositoriesService repositoriesService,
+        final Consumer<IndexShard.ShardFailure> onShardFailure,
+        final Consumer<ShardId> globalCheckpointSyncer,
+        final RetentionLeaseSyncer retentionLeaseSyncer,
+        final DiscoveryNode targetNode,
+        final DiscoveryNode sourceNode,
+        final RemoteStoreStatsTrackerFactory remoteStoreStatsTrackerFactory,
+        final DiscoveryNodes discoveryNodes,
+        final MergedSegmentWarmerFactory mergedSegmentWarmerFactory
+    ) throws IOException {
+        return createShard(
+            shardRouting,
+            checkpointPublisher,
+            recoveryTargetService,
+            recoveryListener,
+            repositoriesService,
+            onShardFailure,
+            globalCheckpointSyncer,
+            retentionLeaseSyncer,
+            targetNode,
+            sourceNode,
+            remoteStoreStatsTrackerFactory,
+            discoveryNodes,
+            mergedSegmentWarmerFactory,
+            null,
+            null
+        );
+    }
+
     @Override
     public IndexShard createShard(
         final ShardRouting shardRouting,
@@ -1166,7 +1267,10 @@ public class IndicesService extends AbstractLifecycleComponent
         final DiscoveryNode targetNode,
         final DiscoveryNode sourceNode,
         final RemoteStoreStatsTrackerFactory remoteStoreStatsTrackerFactory,
-        final DiscoveryNodes discoveryNodes
+        final DiscoveryNodes discoveryNodes,
+        final MergedSegmentWarmerFactory mergedSegmentWarmerFactory,
+        final MergedSegmentPublisher mergedSegmentPublisher,
+        final ReferencedSegmentsPublisher referencedSegmentsPublisher
     ) throws IOException {
         Objects.requireNonNull(retentionLeaseSyncer);
         ensureChangesAllowed();
@@ -1182,7 +1286,10 @@ public class IndicesService extends AbstractLifecycleComponent
             repositoriesService,
             targetNode,
             sourceNode,
-            discoveryNodes
+            discoveryNodes,
+            mergedSegmentWarmerFactory,
+            mergedSegmentPublisher,
+            referencedSegmentsPublisher
         );
         indexShard.addShardFailureCallback(onShardFailure);
         indexShard.startRecovery(recoveryState, recoveryTargetService, recoveryListener, repositoriesService, mapping -> {
@@ -2177,6 +2284,10 @@ public class IndicesService extends AbstractLifecycleComponent
         return this.clusterDefaultRefreshInterval;
     }
 
+    private Integer getClusterDefaultMaxMergeAtOnce() {
+        return this.defaultMaxMergeAtOnce;
+    }
+
     public RemoteStoreSettings getRemoteStoreSettings() {
         return this.remoteStoreSettings;
     }
@@ -2196,5 +2307,23 @@ public class IndicesService extends AbstractLifecycleComponent
 
     private boolean isFixedRefreshIntervalSchedulingEnabled() {
         return fixedRefreshIntervalSchedulingEnabled;
+    }
+
+    private void onRefreshLevelChange(Boolean newShardLevelRefreshVal) {
+        if (this.shardLevelRefreshEnabled != newShardLevelRefreshVal) {
+            boolean prevShardLevelRefreshVal = this.shardLevelRefreshEnabled;
+            this.shardLevelRefreshEnabled = newShardLevelRefreshVal;
+            // The refresh mode has changed from index level to shard level and vice versa
+            logger.info("refresh tasks rescheduled oldVal={} newVal={}", prevShardLevelRefreshVal, newShardLevelRefreshVal);
+            for (Map.Entry<String, IndexService> entry : indices.entrySet()) {
+                IndexService indexService = entry.getValue();
+                indexService.onRefreshLevelChange(newShardLevelRefreshVal);
+            }
+        }
+    }
+
+    // Visible for testing
+    public boolean isShardLevelRefreshEnabled() {
+        return shardLevelRefreshEnabled;
     }
 }

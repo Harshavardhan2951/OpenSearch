@@ -77,6 +77,7 @@ import org.opensearch.common.lucene.search.MultiPhrasePrefixQuery;
 import org.opensearch.common.xcontent.support.XContentMapValues;
 import org.opensearch.core.xcontent.ToXContent;
 import org.opensearch.core.xcontent.XContentBuilder;
+import org.opensearch.index.IndexSettings;
 import org.opensearch.index.analysis.AnalyzerScope;
 import org.opensearch.index.analysis.IndexAnalyzers;
 import org.opensearch.index.analysis.NamedAnalyzer;
@@ -471,6 +472,9 @@ public class TextFieldMapper extends ParametrizedFieldMapper {
         public TextFieldMapper build(BuilderContext context) {
             FieldType fieldType = TextParams.buildFieldType(index, store, indexOptions, norms, termVectors);
             TextFieldType tft = buildFieldType(fieldType, context);
+            if (context.indexSettings().getAsBoolean(IndexSettings.INDEX_DERIVED_SOURCE_SETTING.getKey(), false)) {
+                fieldType.setStored(true);
+            }
             return new TextFieldMapper(
                 name,
                 fieldType,
@@ -1225,5 +1229,21 @@ public class TextFieldMapper extends ParametrizedFieldMapper {
         mapperBuilder.freqFilter.toXContent(builder, includeDefaults);
         mapperBuilder.indexPrefixes.toXContent(builder, includeDefaults);
         mapperBuilder.indexPhrases.toXContent(builder, includeDefaults);
+    }
+
+    @Override
+    protected void canDeriveSourceInternal() {}
+
+    /**
+     * Derive source using stored field, which would always be present for derived source enabled index field
+     */
+    @Override
+    protected DerivedFieldGenerator derivedFieldGenerator() {
+        return new DerivedFieldGenerator(mappedFieldType, null, new StoredFieldFetcher(mappedFieldType, simpleName())) {
+            @Override
+            public FieldValueType getDerivedFieldPreference() {
+                return FieldValueType.STORED;
+            }
+        };
     }
 }

@@ -217,6 +217,23 @@ public class ScaledFloatFieldMapper extends ParametrizedFieldMapper {
             return point;
         }
 
+        @Override
+        public byte[] encodePoint(Object value, boolean roundUp) {
+            long scaledValue = Math.round(scale(value));
+            if (roundUp) {
+                if (scaledValue < Long.MAX_VALUE) {
+                    scaledValue = scaledValue + 1;
+                }
+            } else {
+                if (scaledValue > Long.MIN_VALUE) {
+                    scaledValue = scaledValue - 1;
+                }
+            }
+            byte[] point = new byte[Long.BYTES];
+            LongPoint.encodeDimension(scaledValue, point, 0);
+            return point;
+        }
+
         public double getScalingFactor() {
             return scalingFactor;
         }
@@ -395,8 +412,9 @@ public class ScaledFloatFieldMapper extends ParametrizedFieldMapper {
         return coerce.value();
     }
 
-    boolean ignoreMalformed() {
-        return ignoreMalformed.value();
+    @Override
+    protected Explicit<Boolean> ignoreMalformed() {
+        return ignoreMalformed;
     }
 
     @Override
@@ -467,7 +485,14 @@ public class ScaledFloatFieldMapper extends ParametrizedFieldMapper {
         }
         long scaledValue = Math.round(doubleValue * scalingFactor);
 
-        List<Field> fields = NumberFieldMapper.NumberType.LONG.createFields(fieldType().name(), scaledValue, indexed, hasDocValues, stored);
+        List<Field> fields = NumberFieldMapper.NumberType.LONG.createFields(
+            fieldType().name(),
+            scaledValue,
+            indexed,
+            hasDocValues,
+            false,
+            stored
+        );
         context.doc().addAll(fields);
 
         if (hasDocValues == false && (indexed || stored)) {
@@ -498,6 +523,29 @@ public class ScaledFloatFieldMapper extends ParametrizedFieldMapper {
         }
 
         return doubleValue;
+    }
+
+    @Override
+    protected void canDeriveSourceInternal() {
+        checkStoredAndDocValuesForDerivedSource();
+    }
+
+    /**
+     * 1. If it has doc values, build source using doc values
+     * 2. If doc_values is disabled in field mapping, then build source using stored field
+     * <p>
+     * Considerations:
+     *    1. When using doc values, for multi value field, result would be in sorted order
+     *    2. There might be precision loss as values are stored as long after multiplying it with "scaling_factor" for
+     *       both doc values and stored field
+     */
+    @Override
+    protected DerivedFieldGenerator derivedFieldGenerator() {
+        return new DerivedFieldGenerator(
+            mappedFieldType,
+            new SortedNumericDocValuesFetcher(mappedFieldType, simpleName()),
+            new StoredFieldFetcher(mappedFieldType, simpleName())
+        );
     }
 
     private static class ScaledFloatIndexFieldData extends IndexNumericFieldData {

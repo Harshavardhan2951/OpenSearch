@@ -68,6 +68,7 @@ import org.opensearch.action.support.replication.ReplicationResponse;
 import org.opensearch.cluster.ClusterModule;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.routing.AllocationId;
+import org.opensearch.cluster.service.ClusterApplierService;
 import org.opensearch.common.CheckedBiFunction;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.Randomness;
@@ -118,6 +119,7 @@ import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.TranslogConfig;
 import org.opensearch.index.translog.TranslogDeletionPolicy;
 import org.opensearch.index.translog.TranslogManager;
+import org.opensearch.index.translog.TranslogOperationHelper;
 import org.opensearch.index.translog.listener.TranslogEventListener;
 import org.opensearch.test.DummyShardLock;
 import org.opensearch.test.IndexSettingsModule;
@@ -416,12 +418,14 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
         document.add(seqID.seqNo);
         document.add(seqID.seqNoDocValue);
         document.add(seqID.primaryTerm);
-        BytesRef ref = source.toBytesRef();
-        if (recoverySource) {
-            document.add(new StoredField(SourceFieldMapper.RECOVERY_SOURCE_NAME, ref.bytes, ref.offset, ref.length));
-            document.add(new NumericDocValuesField(SourceFieldMapper.RECOVERY_SOURCE_NAME, 1));
-        } else {
-            document.add(new StoredField(SourceFieldMapper.NAME, ref.bytes, ref.offset, ref.length));
+        if (source != null) {
+            BytesRef ref = source.toBytesRef();
+            if (recoverySource) {
+                document.add(new StoredField(SourceFieldMapper.RECOVERY_SOURCE_NAME, ref.bytes, ref.offset, ref.length));
+                document.add(new NumericDocValuesField(SourceFieldMapper.RECOVERY_SOURCE_NAME, 1));
+            } else {
+                document.add(new StoredField(SourceFieldMapper.NAME, ref.bytes, ref.offset, ref.length));
+            }
         }
         return new ParsedDocument(versionField, seqID, id, routing, Arrays.asList(document), source, MediaTypeRegistry.JSON, mappingUpdate);
     }
@@ -548,7 +552,8 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
             createTranslogDeletionPolicy(INDEX_SETTINGS),
             () -> SequenceNumbers.NO_OPS_PERFORMED,
             primaryTermSupplier,
-            seqNo -> {}
+            seqNo -> {},
+            TranslogOperationHelper.create(engine.config())
         );
     }
 
@@ -991,7 +996,11 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
     /**
      * Override config with ingestion engine configs
      */
-    protected EngineConfig config(EngineConfig config, Supplier<DocumentMapperForType> documentMapperForTypeSupplier) {
+    protected EngineConfig config(
+        EngineConfig config,
+        Supplier<DocumentMapperForType> documentMapperForTypeSupplier,
+        ClusterApplierService clusterApplierService
+    ) {
         IndexSettings indexSettings = IndexSettingsModule.newIndexSettings(
             "test",
             Settings.builder().put(config.getIndexSettings().getSettings()).build()
@@ -1019,6 +1028,7 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
             .primaryTermSupplier(config.getPrimaryTermSupplier())
             .tombstoneDocSupplier(config.getTombstoneDocSupplier())
             .documentMapperForTypeSupplier(documentMapperForTypeSupplier)
+            .clusterApplierService(clusterApplierService)
             .build();
     }
 

@@ -97,12 +97,13 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.RemoteClusterAware;
 import org.opensearch.transport.RemoteClusterService;
 import org.opensearch.transport.RemoteTransportException;
+import org.opensearch.transport.StreamTransportService;
 import org.opensearch.transport.Transport;
 import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.Client;
 import org.opensearch.transport.client.OriginSettingClient;
 import org.opensearch.transport.client.node.NodeClient;
-import org.opensearch.wlm.QueryGroupTask;
+import org.opensearch.wlm.WorkloadGroupTask;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -163,19 +164,19 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         Setting.Property.NodeScope
     );
 
-    private final NodeClient client;
+    final NodeClient client;
     private final ThreadPool threadPool;
-    private final ClusterService clusterService;
-    private final SearchTransportService searchTransportService;
+    final ClusterService clusterService;
+    final SearchTransportService searchTransportService;
     private final RemoteClusterService remoteClusterService;
-    private final SearchPhaseController searchPhaseController;
+    final SearchPhaseController searchPhaseController;
     private final SearchService searchService;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final NamedWriteableRegistry namedWriteableRegistry;
-    private final CircuitBreaker circuitBreaker;
+    final CircuitBreaker circuitBreaker;
     private final SearchPipelineService searchPipelineService;
     private final SearchRequestOperationsCompositeListenerFactory searchRequestOperationsCompositeListenerFactory;
-    private final Tracer tracer;
+    final Tracer tracer;
 
     private final MetricsRegistry metricsRegistry;
 
@@ -207,7 +208,11 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         this.searchPhaseController = searchPhaseController;
         this.searchTransportService = searchTransportService;
         this.remoteClusterService = searchTransportService.getRemoteClusterService();
-        SearchTransportService.registerRequestHandler(transportService, searchService);
+        if (transportService instanceof StreamTransportService) {
+            StreamSearchTransportService.registerStreamRequestHandler((StreamTransportService) transportService, searchService);
+        } else {
+            SearchTransportService.registerRequestHandler(transportService, searchService);
+        }
         this.clusterService = clusterService;
         this.searchService = searchService;
         this.indexNameExpressionResolver = indexNameExpressionResolver;
@@ -413,7 +418,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         }, listener);
     }
 
-    private void executeRequest(
+    void executeRequest(
         Task task,
         SearchRequest originalSearchRequest,
         SearchAsyncActionProvider searchAsyncActionProvider,
@@ -447,8 +452,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
 
             // At this point either the QUERY_GROUP_ID header will be present in ThreadContext either via ActionFilter
             // or HTTP header (HTTP header will be deprecated once ActionFilter is implemented)
-            if (task instanceof QueryGroupTask) {
-                ((QueryGroupTask) task).setQueryGroupId(threadPool.getThreadContext());
+            if (task instanceof WorkloadGroupTask) {
+                ((WorkloadGroupTask) task).setWorkloadGroupId(threadPool.getThreadContext());
             }
 
             PipelinedRequest searchRequest;
@@ -1203,7 +1208,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         );
     }
 
-    private AbstractSearchAsyncAction<? extends SearchPhaseResult> searchAsyncAction(
+    AbstractSearchAsyncAction<? extends SearchPhaseResult> searchAsyncAction(
         SearchTask task,
         SearchRequest searchRequest,
         Executor executor,
@@ -1265,7 +1270,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                 task.getProgressListener(),
                 searchRequest,
                 shardIterators.size(),
-                exc -> cancelTask(task, exc)
+                exc -> cancelTask(task, exc),
+                task::isCancelled
             );
             AbstractSearchAsyncAction<? extends SearchPhaseResult> searchAsyncAction;
             switch (searchRequest.searchType()) {
@@ -1320,7 +1326,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         }
     }
 
-    private void cancelTask(SearchTask task, Exception exc) {
+    void cancelTask(SearchTask task, Exception exc) {
         String errorMsg = exc.getMessage() != null ? exc.getMessage() : "";
         CancelTasksRequest req = new CancelTasksRequest().setTaskId(new TaskId(client.getLocalNodeId(), task.getId()))
             .setReason("Fatal failure during search: " + errorMsg);

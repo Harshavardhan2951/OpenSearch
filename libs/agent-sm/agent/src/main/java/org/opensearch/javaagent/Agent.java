@@ -10,10 +10,14 @@ package org.opensearch.javaagent;
 
 import org.opensearch.javaagent.bootstrap.AgentPolicy;
 
+import javax.security.auth.Subject;
+
 import java.lang.instrument.Instrumentation;
+import java.net.Socket;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
+import java.nio.file.spi.FileSystemProvider;
 import java.util.Map;
 
 import net.bytebuddy.ByteBuddy;
@@ -23,6 +27,7 @@ import net.bytebuddy.description.type.TypeDescription;
 import net.bytebuddy.dynamic.ClassFileLocator;
 import net.bytebuddy.dynamic.loading.ClassInjector;
 import net.bytebuddy.implementation.Implementation;
+import net.bytebuddy.implementation.MethodDelegation;
 import net.bytebuddy.matcher.ElementMatcher.Junction;
 import net.bytebuddy.matcher.ElementMatchers;
 
@@ -71,10 +76,12 @@ public class Agent {
         initAgent(instrumentation);
     }
 
-    private static AgentBuilder createAgentBuilder(Instrumentation inst) throws Exception {
-        final Junction<TypeDescription> systemType = ElementMatchers.isSubTypeOf(SocketChannel.class);
+    private static AgentBuilder createAgentBuilder() throws Exception {
+        final Junction<TypeDescription> socketType = ElementMatchers.isSubTypeOf(SocketChannel.class)
+            .or(ElementMatchers.isSubTypeOf(Socket.class));
         final Junction<TypeDescription> pathType = ElementMatchers.isSubTypeOf(Files.class);
         final Junction<TypeDescription> fileChannelType = ElementMatchers.isSubTypeOf(FileChannel.class);
+        final Junction<TypeDescription> fileSystemProviderType = ElementMatchers.isSubTypeOf(FileSystemProvider.class);
 
         final AgentBuilder.Transformer socketTransformer = (b, typeDescription, classLoader, module, pd) -> b.visit(
             Advice.to(SocketChannelInterceptor.class)
@@ -85,6 +92,10 @@ public class Agent {
             Advice.to(FileInterceptor.class).on(ElementMatchers.namedOneOf(INTERCEPTED_METHODS).or(ElementMatchers.isAbstract()))
         );
 
+        final AgentBuilder.Transformer subjectTransformer = (b, typeDescription, classLoader, module, pd) -> b.method(
+            ElementMatchers.named("getSubject")
+        ).intercept(MethodDelegation.to(SubjectInterceptor.class));
+
         ClassInjector.UsingUnsafe.ofBootLoader()
             .inject(
                 Map.of(
@@ -93,18 +104,20 @@ public class Agent {
                     new TypeDescription.ForLoadedType(StackCallerClassChainExtractor.class),
                     ClassFileLocator.ForClassLoader.read(StackCallerClassChainExtractor.class),
                     new TypeDescription.ForLoadedType(AgentPolicy.class),
-                    ClassFileLocator.ForClassLoader.read(AgentPolicy.class)
+                    ClassFileLocator.ForClassLoader.read(AgentPolicy.class),
+                    new TypeDescription.ForLoadedType(SubjectInterceptor.class),
+                    ClassFileLocator.ForClassLoader.read(SubjectInterceptor.class)
                 )
             );
 
         final ByteBuddy byteBuddy = new ByteBuddy().with(Implementation.Context.Disabled.Factory.INSTANCE);
-        final AgentBuilder agentBuilder = new AgentBuilder.Default(byteBuddy).with(AgentBuilder.InitializationStrategy.NoOp.INSTANCE)
+        var builder = new AgentBuilder.Default(byteBuddy).with(AgentBuilder.InitializationStrategy.NoOp.INSTANCE)
             .with(AgentBuilder.RedefinitionStrategy.REDEFINITION)
             .with(AgentBuilder.TypeStrategy.Default.REDEFINE)
-            .ignore(ElementMatchers.none())
-            .type(systemType)
+            .ignore(ElementMatchers.nameContains("$MockitoMock$")) /* ingore all Mockito mocks */
+            .type(socketType)
             .transform(socketTransformer)
-            .type(pathType.or(fileChannelType))
+            .type(pathType.or(fileChannelType).or(fileSystemProviderType))
             .transform(fileTransformer)
             .type(ElementMatchers.is(java.lang.System.class))
             .transform(
@@ -119,11 +132,16 @@ public class Agent {
                 )
             );
 
-        return agentBuilder;
+        // Only apply the transformation when running on JDK-24 or above
+        if (Runtime.version().feature() >= 24) {
+            builder = builder.type(ElementMatchers.is(Subject.class)).transform(subjectTransformer);
+        }
+
+        return builder;
     }
 
     private static void initAgent(Instrumentation instrumentation) throws Exception {
-        AgentBuilder agentBuilder = createAgentBuilder(instrumentation);
+        AgentBuilder agentBuilder = createAgentBuilder();
         agentBuilder.installOn(instrumentation);
     }
 }

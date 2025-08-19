@@ -37,6 +37,7 @@ import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.lucene101.Lucene101Codec;
 import org.apache.lucene.codecs.lucene101.Lucene101Codec.Mode;
 import org.opensearch.common.Nullable;
+import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.MapBuilder;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.codec.composite.CompositeCodecFactory;
@@ -50,8 +51,9 @@ import java.util.Map;
  * data-structures per field. OpenSearch exposes the full
  * {@link Codec} capabilities through this {@link CodecService}.
  *
- * @opensearch.internal
+ * @opensearch.api
  */
+@PublicApi(since = "3.3.0")
 public class CodecService {
 
     private final Map<String, Codec> codecs;
@@ -91,6 +93,13 @@ public class CodecService {
             codecs.put(codec, Codec.forName(codec));
         }
         this.codecs = codecs.immutableMap();
+    }
+
+    /**
+     * Returns default codec
+     */
+    public final Codec defaultCodec() {
+        return codecs.get(DEFAULT_CODEC);
     }
 
     public Codec codec(String name) {

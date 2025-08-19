@@ -16,13 +16,13 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up required env vars
         run: |
           echo "PR_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
           echo "REPOSITORY=${{ github.event.repository.full_name }}" >> $GITHUB_ENV
           OPENSEARCH_VERSION=$(awk -F '=' '/^opensearch[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2}' buildSrc/version.properties)
-          echo "OPENSEARCH_VERSION=$OPENSEARCH_VERSION-beta1" >> $GITHUB_ENV
+          echo "OPENSEARCH_VERSION=$OPENSEARCH_VERSION" >> $GITHUB_ENV
           major_version=$(echo $OPENSEARCH_VERSION | cut -d'.' -f1)
           echo "OPENSEARCH_MAJOR_VERSION=$major_version" >> $GITHUB_ENV
           echo "USER_TAGS=pull_request_number:${{ github.event.issue.number }},repository:OpenSearch" >> $GITHUB_ENV
@@ -135,7 +135,7 @@ jobs:
           issue-body: "Please approve or deny the benchmark run for PR #${{ env.PR_NUMBER }}"
           exclude-workflow-initiator-as-approver: false
       - name: Checkout PR Repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.prHeadRepo }}
           ref: ${{ env.prHeadRefSha }}
@@ -147,7 +147,7 @@ jobs:
           distribution: 'temurin'
       - name: Build and Assemble OpenSearch from PR
         run: |
-          ./gradlew :distribution:archives:linux-tar:assemble -Dbuild.snapshot=false -Dbuild.version_qualifier=beta1
+          ./gradlew :distribution:archives:linux-tar:assemble -Dbuild.snapshot=false
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -159,7 +159,7 @@ jobs:
           aws s3 cp distribution/archives/linux-tar/build/distributions/opensearch-min-$OPENSEARCH_VERSION-linux-x64.tar.gz s3://${{ secrets.ARCHIVE_ARTIFACT_BUCKET_NAME }}/PR-$PR_NUMBER/
           echo "DISTRIBUTION_URL=${{ secrets.ARTIFACT_BUCKET_CLOUDFRONT_URL }}/PR-$PR_NUMBER/opensearch-min-$OPENSEARCH_VERSION-linux-x64.tar.gz" >> $GITHUB_ENV
       - name: Checkout opensearch-build repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: opensearch-project/opensearch-build
           ref: main
