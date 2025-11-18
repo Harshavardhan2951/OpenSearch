@@ -433,8 +433,8 @@ public class ExpressionScriptEngine implements ScriptEngine {
         List<String> stack = new ArrayList<>();
         stack.add(portion);
         StringBuilder pointer = new StringBuilder();
-        if (cause instanceof ParseException) {
-            int offset = ((ParseException) cause).getErrorOffset();
+        if (cause instanceof ParseException parseException) {
+            int offset = parseException.getErrorOffset();
             for (int i = 0; i < offset; i++) {
                 pointer.append(' ');
             }
@@ -496,14 +496,14 @@ public class ExpressionScriptEngine implements ScriptEngine {
 
         IndexFieldData<?> fieldData = lookup.doc().getForField(fieldType);
         final DoubleValuesSource valueSource;
-        if (fieldType instanceof GeoPointFieldType) {
+        if (fieldType.unwrap() instanceof GeoPointFieldType) {
             // geo
             if (methodname == null) {
                 valueSource = GeoField.getVariable(fieldData, fieldname, variablename);
             } else {
                 valueSource = GeoField.getMethod(fieldData, fieldname, methodname);
             }
-        } else if (fieldType instanceof DateFieldMapper.DateFieldType) {
+        } else if (fieldType.unwrap() instanceof DateFieldMapper.DateFieldType) {
             if (dateAccessor) {
                 // date object
                 if (methodname == null) {
@@ -540,8 +540,8 @@ public class ExpressionScriptEngine implements ScriptEngine {
         // NOTE: by checking for the variable in vars first, it allows masking document fields with a global constant,
         // but if we were to reverse it, we could provide a way to supply dynamic defaults for documents missing the field?
         Object value = params.get(variable);
-        if (value instanceof Number) {
-            bindings.add(variable, DoubleValuesSource.constant(((Number) value).doubleValue()));
+        if (value instanceof Number number) {
+            bindings.add(variable, DoubleValuesSource.constant(number.doubleValue()));
         } else {
             throw new ParseException("Parameter [" + variable + "] must be a numeric type", 0);
         }

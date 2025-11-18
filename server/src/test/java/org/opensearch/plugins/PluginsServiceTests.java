@@ -36,7 +36,6 @@ import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.lucene.tests.util.LuceneTestCase;
 import org.apache.lucene.util.Constants;
-import org.opensearch.LegacyESVersion;
 import org.opensearch.Version;
 import org.opensearch.common.bootstrap.JarHell;
 import org.opensearch.common.collect.Tuple;
@@ -100,13 +99,7 @@ public class PluginsServiceTests extends OpenSearchTestCase {
     public static class FilterablePlugin extends Plugin implements ScriptPlugin {}
 
     static PluginsService newPluginsService(Settings settings, Class<? extends Plugin>... classpathPlugins) {
-        return new PluginsService(
-            settings,
-            null,
-            null,
-            TestEnvironment.newEnvironment(settings).pluginsDir(),
-            Arrays.asList(classpathPlugins)
-        );
+        return new PluginsService(settings, null, TestEnvironment.newEnvironment(settings).pluginsDir(), Arrays.asList(classpathPlugins));
     }
 
     public void testAdditionalSettings() {
@@ -736,14 +729,14 @@ public class PluginsServiceTests extends OpenSearchTestCase {
             "my_plugin",
             "desc",
             "1.0",
-            LegacyESVersion.fromId(6000099),
+            Version.fromString("1.0.0"),
             "1.8",
             "FakePlugin",
             Collections.emptyList(),
             false
         );
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> PluginsService.verifyCompatibility(info));
-        assertThat(e.getMessage(), containsString("was built for OpenSearch version 6.0.0"));
+        assertThat(e.getMessage(), containsString("was built for OpenSearch version 1.0.0"));
     }
 
     public void testCompatibleOpenSearchVersionRange() {

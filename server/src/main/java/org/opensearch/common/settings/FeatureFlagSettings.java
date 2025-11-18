@@ -35,10 +35,9 @@ public class FeatureFlagSettings extends AbstractScopedSettings {
         FeatureFlags.DATETIME_FORMATTER_CACHING_SETTING,
         FeatureFlags.WRITABLE_WARM_INDEX_SETTING,
         FeatureFlags.REMOTE_STORE_MIGRATION_EXPERIMENTAL_SETTING,
-        FeatureFlags.STAR_TREE_INDEX_SETTING,
         FeatureFlags.APPLICATION_BASED_CONFIGURATION_TEMPLATES_SETTING,
-        FeatureFlags.READER_WRITER_SPLIT_EXPERIMENTAL_SETTING,
         FeatureFlags.TERM_VERSION_PRECOMMIT_ENABLE_SETTING,
-        FeatureFlags.ARROW_STREAMS_SETTING
+        FeatureFlags.ARROW_STREAMS_SETTING,
+        FeatureFlags.STREAM_TRANSPORT_SETTING
     );
 }

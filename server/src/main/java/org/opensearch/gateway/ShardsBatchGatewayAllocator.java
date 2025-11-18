@@ -43,7 +43,6 @@ import org.opensearch.index.store.Store;
 import org.opensearch.indices.store.ShardAttributes;
 import org.opensearch.indices.store.TransportNodesListShardStoreMetadataBatch;
 import org.opensearch.indices.store.TransportNodesListShardStoreMetadataBatch.NodeStoreFilesMetadata;
-import org.opensearch.indices.store.TransportNodesListShardStoreMetadataHelper;
 import org.opensearch.indices.store.TransportNodesListShardStoreMetadataHelper.StoreFilesMetadata;
 import org.opensearch.telemetry.metrics.noop.NoopMetricsRegistry;
 
@@ -85,6 +84,7 @@ public class ShardsBatchGatewayAllocator implements ExistingShardsAllocator {
     private TimeValue replicaShardsBatchGatewayAllocatorTimeout;
     private volatile Priority followUpRerouteTaskPriority;
     public static final TimeValue MIN_ALLOCATOR_TIMEOUT = TimeValue.timeValueSeconds(20);
+    public static final TimeValue DEFAULT_ALLOCATOR_TIMEOUT = TimeValue.timeValueSeconds(20);
     private final ClusterManagerMetrics clusterManagerMetrics;
 
     /**
@@ -105,7 +105,7 @@ public class ShardsBatchGatewayAllocator implements ExistingShardsAllocator {
      */
     public static final Setting<TimeValue> PRIMARY_BATCH_ALLOCATOR_TIMEOUT_SETTING = Setting.timeSetting(
         PRIMARY_BATCH_ALLOCATOR_TIMEOUT_SETTING_KEY,
-        TimeValue.MINUS_ONE,
+        DEFAULT_ALLOCATOR_TIMEOUT,
         TimeValue.MINUS_ONE,
         new Setting.Validator<>() {
             @Override
@@ -129,7 +129,7 @@ public class ShardsBatchGatewayAllocator implements ExistingShardsAllocator {
      */
     public static final Setting<TimeValue> REPLICA_BATCH_ALLOCATOR_TIMEOUT_SETTING = Setting.timeSetting(
         REPLICA_BATCH_ALLOCATOR_TIMEOUT_SETTING_KEY,
-        TimeValue.MINUS_ONE,
+        DEFAULT_ALLOCATOR_TIMEOUT,
         TimeValue.MINUS_ONE,
         new Setting.Validator<>() {
             @Override
@@ -835,17 +835,6 @@ public class ShardsBatchGatewayAllocator implements ExistingShardsAllocator {
 
         protected void removeShard(ShardId shardId) {
             this.batchInfo.remove(shardId);
-        }
-
-        private TransportNodesListShardStoreMetadataBatch.NodeStoreFilesMetadata buildEmptyReplicaShardResponse() {
-            return new TransportNodesListShardStoreMetadataBatch.NodeStoreFilesMetadata(
-                new TransportNodesListShardStoreMetadataHelper.StoreFilesMetadata(
-                    null,
-                    Store.MetadataSnapshot.EMPTY,
-                    Collections.emptyList()
-                ),
-                null
-            );
         }
 
         private void removeFromBatch(ShardRouting shard) {

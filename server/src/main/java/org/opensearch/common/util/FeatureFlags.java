@@ -37,16 +37,9 @@ public class FeatureFlags {
     public static final String REMOTE_STORE_MIGRATION_EXPERIMENTAL = FEATURE_FLAG_PREFIX + "remote_store.migration.enabled";
 
     /**
-     * Gates the ability for Searchable Snapshots to read snapshots that are older than the
-     * guaranteed backward compatibility for OpenSearch (one prior major version) on a best effort basis.
+     * Gates the visibility of the context aware segments.
      */
-    public static final String SEARCHABLE_SNAPSHOT_EXTENDED_COMPATIBILITY = FEATURE_FLAG_PREFIX
-        + "searchable_snapshot.extended_compatibility.enabled";
-    public static final Setting<Boolean> SEARCHABLE_SNAPSHOT_EXTENDED_COMPATIBILITY_SETTING = Setting.boolSetting(
-        SEARCHABLE_SNAPSHOT_EXTENDED_COMPATIBILITY,
-        false,
-        Property.NodeScope
-    );
+    public static final String CONTEXT_AWARE_MIGRATION_EXPERIMENTAL_FLAG = FEATURE_FLAG_PREFIX + "context_aware.migration.enabled";
 
     /**
      * Gates the functionality of extensions.
@@ -75,10 +68,14 @@ public class FeatureFlags {
      */
     public static final String BACKGROUND_TASK_EXECUTION_EXPERIMENTAL = FEATURE_FLAG_PREFIX + "task.background.enabled";
 
-    public static final String READER_WRITER_SPLIT_EXPERIMENTAL = FEATURE_FLAG_PREFIX + "read.write.split.enabled";
-
     public static final Setting<Boolean> REMOTE_STORE_MIGRATION_EXPERIMENTAL_SETTING = Setting.boolSetting(
         REMOTE_STORE_MIGRATION_EXPERIMENTAL,
+        false,
+        Property.NodeScope
+    );
+
+    public static final Setting<Boolean> CONTEXT_AWARE_MIGRATION_EXPERIMENTAL_SETTING = Setting.boolSetting(
+        CONTEXT_AWARE_MIGRATION_EXPERIMENTAL_FLAG,
         false,
         Property.NodeScope
     );
@@ -99,19 +96,6 @@ public class FeatureFlags {
         Property.NodeScope
     );
 
-    public static final Setting<Boolean> READER_WRITER_SPLIT_EXPERIMENTAL_SETTING = Setting.boolSetting(
-        READER_WRITER_SPLIT_EXPERIMENTAL,
-        false,
-        Property.NodeScope
-    );
-
-    /**
-     * Gates the functionality of star tree index, which improves the performance of search
-     * aggregations.
-     */
-    public static final String STAR_TREE_INDEX = FEATURE_FLAG_PREFIX + "composite_index.star_tree.enabled";
-    public static final Setting<Boolean> STAR_TREE_INDEX_SETTING = Setting.boolSetting(STAR_TREE_INDEX, false, Property.NodeScope);
-
     /**
      * Gates the functionality of application based configuration templates.
      */
@@ -122,21 +106,15 @@ public class FeatureFlags {
         Property.NodeScope
     );
 
-    /**
-     * Gates the functionality of ApproximatePointRangeQuery where we approximate query results.
-     */
-    public static final String APPROXIMATE_POINT_RANGE_QUERY = FEATURE_FLAG_PREFIX + "approximate_point_range_query.enabled";
-    public static final Setting<Boolean> APPROXIMATE_POINT_RANGE_QUERY_SETTING = Setting.boolSetting(
-        APPROXIMATE_POINT_RANGE_QUERY,
-        false,
-        Property.NodeScope
-    );
     public static final String TERM_VERSION_PRECOMMIT_ENABLE = OS_EXPERIMENTAL_PREFIX + "optimization.termversion.precommit.enabled";
     public static final Setting<Boolean> TERM_VERSION_PRECOMMIT_ENABLE_SETTING = Setting.boolSetting(
         TERM_VERSION_PRECOMMIT_ENABLE,
         false,
         Property.NodeScope
     );
+
+    public static final String STREAM_TRANSPORT = FEATURE_FLAG_PREFIX + "transport.stream.enabled";
+    public static final Setting<Boolean> STREAM_TRANSPORT_SETTING = Setting.boolSetting(STREAM_TRANSPORT, false, Property.NodeScope);
 
     public static final String ARROW_STREAMS = FEATURE_FLAG_PREFIX + "arrow.streams.enabled";
     public static final Setting<Boolean> ARROW_STREAMS_SETTING = Setting.boolSetting(ARROW_STREAMS, false, Property.NodeScope);
@@ -159,18 +137,14 @@ public class FeatureFlags {
                 put(TELEMETRY_SETTING, TELEMETRY_SETTING.getDefault(Settings.EMPTY));
                 put(DATETIME_FORMATTER_CACHING_SETTING, DATETIME_FORMATTER_CACHING_SETTING.getDefault(Settings.EMPTY));
                 put(WRITABLE_WARM_INDEX_SETTING, WRITABLE_WARM_INDEX_SETTING.getDefault(Settings.EMPTY));
-                put(STAR_TREE_INDEX_SETTING, STAR_TREE_INDEX_SETTING.getDefault(Settings.EMPTY));
                 put(
                     APPLICATION_BASED_CONFIGURATION_TEMPLATES_SETTING,
                     APPLICATION_BASED_CONFIGURATION_TEMPLATES_SETTING.getDefault(Settings.EMPTY)
                 );
-                put(READER_WRITER_SPLIT_EXPERIMENTAL_SETTING, READER_WRITER_SPLIT_EXPERIMENTAL_SETTING.getDefault(Settings.EMPTY));
                 put(TERM_VERSION_PRECOMMIT_ENABLE_SETTING, TERM_VERSION_PRECOMMIT_ENABLE_SETTING.getDefault(Settings.EMPTY));
                 put(ARROW_STREAMS_SETTING, ARROW_STREAMS_SETTING.getDefault(Settings.EMPTY));
-                put(
-                    SEARCHABLE_SNAPSHOT_EXTENDED_COMPATIBILITY_SETTING,
-                    SEARCHABLE_SNAPSHOT_EXTENDED_COMPATIBILITY_SETTING.getDefault(Settings.EMPTY)
-                );
+                put(STREAM_TRANSPORT_SETTING, STREAM_TRANSPORT_SETTING.getDefault(Settings.EMPTY));
+                put(CONTEXT_AWARE_MIGRATION_EXPERIMENTAL_SETTING, CONTEXT_AWARE_MIGRATION_EXPERIMENTAL_SETTING.getDefault(Settings.EMPTY));
             }
         };
 

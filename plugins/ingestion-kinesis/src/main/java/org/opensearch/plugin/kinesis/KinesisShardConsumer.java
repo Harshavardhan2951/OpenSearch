@@ -234,7 +234,8 @@ public class KinesisShardConsumer implements IngestionShardConsumer<SequenceNumb
 
         for (Record record : records) {
             SequenceNumber sequenceNumber1 = new SequenceNumber(record.sequenceNumber());
-            KinesisMessage message = new KinesisMessage(record.data().asByteArray());
+            Long timestamp = record.approximateArrivalTimestamp() != null ? record.approximateArrivalTimestamp().toEpochMilli() : null;
+            KinesisMessage message = new KinesisMessage(record.data().asByteArray(), timestamp);
             results.add(new ReadResult<>(sequenceNumber1, message));
         }
 
@@ -244,6 +245,15 @@ public class KinesisShardConsumer implements IngestionShardConsumer<SequenceNumb
     @Override
     public int getShardId() {
         return shardId;
+    }
+
+    /**
+     * Kinesis does not support pointer based lag. Return default value of 0.
+     * @param expectedStartPointer the pointer where ingestion would start if no messages have been consumed yet
+     */
+    @Override
+    public long getPointerBasedLag(IngestionShardPointer expectedStartPointer) {
+        return 0;
     }
 
     @Override

@@ -90,6 +90,7 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 MergeSchedulerConfig.AUTO_THROTTLE_SETTING,
                 MergeSchedulerConfig.MAX_MERGE_COUNT_SETTING,
                 MergeSchedulerConfig.MAX_THREAD_COUNT_SETTING,
+                MergeSchedulerConfig.MAX_FORCE_MERGE_MB_PER_SEC_SETTING,
                 IndexMetadata.SETTING_INDEX_VERSION_CREATED,
                 IndexMetadata.SETTING_INDEX_CREATION_DATE,
                 IndexMetadata.INDEX_UUID_SETTING,
@@ -146,6 +147,7 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 IndexSettings.INDEX_TRANSLOG_DURABILITY_SETTING,
                 IndexSettings.INDEX_WARMER_ENABLED_SETTING,
                 IndexSettings.INDEX_REFRESH_INTERVAL_SETTING,
+                IndexSettings.INDEX_PERIODIC_FLUSH_INTERVAL_SETTING,
                 IndexSettings.MAX_RESULT_WINDOW_SETTING,
                 IndexSettings.MAX_INNER_RESULT_WINDOW_SETTING,
                 IndexSettings.MAX_TOKEN_COUNT_SETTING,
@@ -159,6 +161,7 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 IndexSettings.MAX_TERMS_COUNT_SETTING,
                 IndexSettings.MAX_NESTED_QUERY_DEPTH_SETTING,
                 IndexSettings.INDEX_TRANSLOG_SYNC_INTERVAL_SETTING,
+                IndexSettings.INDEX_PUBLISH_REFERENCED_SEGMENTS_INTERVAL_SETTING,
                 IndexSettings.DEFAULT_FIELD_SETTING,
                 IndexSettings.QUERY_STRING_LENIENT_SETTING,
                 IndexSettings.ALLOW_UNMAPPED,
@@ -169,8 +172,12 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 IndexSettings.MAX_REGEX_LENGTH_SETTING,
                 ShardsLimitAllocationDecider.INDEX_TOTAL_SHARDS_PER_NODE_SETTING,
                 ShardsLimitAllocationDecider.INDEX_TOTAL_PRIMARY_SHARDS_PER_NODE_SETTING,
+                ShardsLimitAllocationDecider.INDEX_TOTAL_REMOTE_CAPABLE_SHARDS_PER_NODE_SETTING,
+                ShardsLimitAllocationDecider.INDEX_TOTAL_REMOTE_CAPABLE_PRIMARY_SHARDS_PER_NODE_SETTING,
                 IndexSettings.INDEX_GC_DELETES_SETTING,
                 IndexSettings.INDEX_SOFT_DELETES_SETTING,
+                IndexSettings.INDEX_CONTEXT_AWARE_ENABLED_SETTING,
+                IndexSettings.INDEX_MAX_RETRY_ON_LOOKUP_MAP_LOCK_ACQUISITION_EXCEPTION,
                 IndexSettings.INDEX_SOFT_DELETES_RETENTION_OPERATIONS_SETTING,
                 IndexSettings.INDEX_SOFT_DELETES_RETENTION_LEASE_PERIOD_SETTING,
                 IndicesRequestCache.INDEX_CACHE_REQUEST_ENABLED_SETTING,
@@ -197,6 +204,8 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 MapperService.INDEX_MAPPING_FIELD_NAME_LENGTH_LIMIT_SETTING,
                 BitsetFilterCache.INDEX_LOAD_RANDOM_ACCESS_FILTERS_EAGERLY_SETTING,
                 IndexModule.INDEX_STORE_TYPE_SETTING,
+                IndexModule.INDEX_COMPOSITE_STORE_TYPE_SETTING,
+                IndexModule.INDEX_STORE_FACTORY_SETTING,
                 IndexModule.INDEX_STORE_PRE_LOAD_SETTING,
                 IndexModule.INDEX_STORE_HYBRID_NIO_EXTENSIONS,
                 IndexModule.INDEX_RECOVERY_TYPE_SETTING,
@@ -259,6 +268,7 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 StarTreeIndexSettings.STAR_TREE_MAX_DATE_INTERVALS_SETTING,
                 StarTreeIndexSettings.STAR_TREE_MAX_BASE_METRICS_SETTING,
                 StarTreeIndexSettings.IS_COMPOSITE_INDEX_SETTING,
+                StarTreeIndexSettings.STAR_TREE_SEARCH_ENABLED_SETTING,
 
                 IndexSettings.INDEX_CONTEXT_CREATED_VERSION,
                 IndexSettings.INDEX_CONTEXT_CURRENT_VERSION,
@@ -269,6 +279,23 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 IndexMetadata.INGESTION_SOURCE_POINTER_INIT_RESET_VALUE_SETTING,
                 IndexMetadata.INGESTION_SOURCE_PARAMS_SETTING,
                 IndexMetadata.INGESTION_SOURCE_ERROR_STRATEGY_SETTING,
+                IndexMetadata.INGESTION_SOURCE_MAX_POLL_SIZE,
+                IndexMetadata.INGESTION_SOURCE_POLL_TIMEOUT,
+                IndexMetadata.INGESTION_SOURCE_NUM_PROCESSOR_THREADS_SETTING,
+                IndexMetadata.INGESTION_SOURCE_INTERNAL_QUEUE_SIZE_SETTING,
+                IndexMetadata.INGESTION_SOURCE_ALL_ACTIVE_INGESTION_SETTING,
+                IndexMetadata.INGESTION_SOURCE_POINTER_BASED_LAG_UPDATE_INTERVAL_SETTING,
+                IndexMetadata.INGESTION_SOURCE_MAPPER_TYPE_SETTING,
+
+                // Settings for search replica
+                IndexMetadata.INDEX_NUMBER_OF_SEARCH_REPLICAS_SETTING,
+
+                // Settings for Auto Force Merge
+                IndexSettings.INDEX_AUTO_FORCE_MERGES_ENABLED,
+
+                // Setting for derived source feature
+                IndexSettings.INDEX_DERIVED_SOURCE_SETTING,
+                IndexSettings.INDEX_DERIVED_SOURCE_TRANSLOG_ENABLED_SETTING,
 
                 // validate that built-in similarities don't get redefined
                 Setting.groupSetting("index.similarity.", (s) -> {
@@ -295,9 +322,7 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
     public static final Map<String, List<Setting>> FEATURE_FLAGGED_INDEX_SETTINGS = Map.of(
         FeatureFlags.WRITABLE_WARM_INDEX_EXPERIMENTAL_FLAG,
         // TODO: Create a separate feature flag for hot tiering index state.
-        List.of(IndexModule.INDEX_STORE_LOCALITY_SETTING, IndexModule.INDEX_TIERING_STATE, IndexModule.IS_WARM_INDEX_SETTING),
-        FeatureFlags.READER_WRITER_SPLIT_EXPERIMENTAL,
-        List.of(IndexMetadata.INDEX_NUMBER_OF_SEARCH_REPLICAS_SETTING)
+        List.of(IndexModule.INDEX_STORE_LOCALITY_SETTING, IndexModule.INDEX_TIERING_STATE, IndexModule.IS_WARM_INDEX_SETTING)
     );
 
     public static final IndexScopedSettings DEFAULT_SCOPED_SETTINGS = new IndexScopedSettings(Settings.EMPTY, BUILT_IN_INDEX_SETTINGS);

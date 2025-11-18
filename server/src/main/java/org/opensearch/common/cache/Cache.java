@@ -156,11 +156,15 @@ public class Cache<K, V> {
         return this.expireAfterWriteNanos;
     }
 
-    void setMaximumWeight(long maximumWeight) {
+    public void setMaximumWeight(long maximumWeight) {
         if (maximumWeight < 0) {
             throw new IllegalArgumentException("maximumWeight < 0");
         }
         this.maximumWeight = maximumWeight;
+    }
+
+    public long getMaximumWeight() {
+        return maximumWeight;
     }
 
     void setWeigher(ToLongBiFunction<K, V> weigher) {
@@ -566,6 +570,19 @@ public class Cache<K, V> {
         }
     };
 
+    private final Consumer<CompletableFuture<Entry<K, V>>> removalConsumer = f -> {
+        try {
+            Entry<K, V> entry = f.get();
+            try (ReleasableLock ignored = lruLock.acquire()) {
+                delete(entry, RemovalReason.EXPLICIT);
+            }
+        } catch (ExecutionException e) {
+            // ok
+        } catch (InterruptedException e) {
+            throw new IllegalStateException(e);
+        }
+    };
+
     /**
      * Invalidate the association for the specified key. A removal notification will be issued for invalidated
      * entries with {@link RemovalReason} INVALIDATED.
@@ -575,6 +592,17 @@ public class Cache<K, V> {
     public void invalidate(K key) {
         CacheSegment<K, V> segment = getCacheSegment(key);
         segment.remove(key, invalidationConsumer);
+    }
+
+    /**
+     * Removes the association for the specified key. A removal notification will be issued for removed
+     * entry with {@link RemovalReason} EXPLICIT.
+     *
+     * @param key the key whose mapping is to be removed from the cache
+     */
+    public void remove(K key) {
+        CacheSegment<K, V> segment = getCacheSegment(key);
+        segment.remove(key, removalConsumer);
     }
 
     /**

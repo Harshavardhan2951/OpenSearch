@@ -68,6 +68,7 @@ import org.opensearch.action.support.replication.ReplicationResponse;
 import org.opensearch.cluster.ClusterModule;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.routing.AllocationId;
+import org.opensearch.cluster.service.ClusterApplierService;
 import org.opensearch.common.CheckedBiFunction;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.Randomness;
@@ -111,6 +112,8 @@ import org.opensearch.index.seqno.LocalCheckpointTracker;
 import org.opensearch.index.seqno.ReplicationTracker;
 import org.opensearch.index.seqno.RetentionLeases;
 import org.opensearch.index.seqno.SequenceNumbers;
+import org.opensearch.index.shard.ShardPath;
+import org.opensearch.index.store.FsDirectoryFactory;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.translog.InternalTranslogManager;
 import org.opensearch.index.translog.LocalTranslog;
@@ -118,6 +121,7 @@ import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.TranslogConfig;
 import org.opensearch.index.translog.TranslogDeletionPolicy;
 import org.opensearch.index.translog.TranslogManager;
+import org.opensearch.index.translog.TranslogOperationHelper;
 import org.opensearch.index.translog.listener.TranslogEventListener;
 import org.opensearch.test.DummyShardLock;
 import org.opensearch.test.IndexSettingsModule;
@@ -159,6 +163,7 @@ import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.mockito.Mockito.mock;
 
 public abstract class EngineTestCase extends OpenSearchTestCase {
 
@@ -361,6 +366,12 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
         }
     }
 
+    protected static ParseContext.Document testContextSpecificDocument() {
+        ParseContext.Document doc = testDocumentWithTextField("criteria");
+        doc.setGroupingCriteria("grouping_criteria");
+        return doc;
+    }
+
     protected static ParseContext.Document testDocumentWithTextField() {
         return testDocumentWithTextField("test");
     }
@@ -416,12 +427,14 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
         document.add(seqID.seqNo);
         document.add(seqID.seqNoDocValue);
         document.add(seqID.primaryTerm);
-        BytesRef ref = source.toBytesRef();
-        if (recoverySource) {
-            document.add(new StoredField(SourceFieldMapper.RECOVERY_SOURCE_NAME, ref.bytes, ref.offset, ref.length));
-            document.add(new NumericDocValuesField(SourceFieldMapper.RECOVERY_SOURCE_NAME, 1));
-        } else {
-            document.add(new StoredField(SourceFieldMapper.NAME, ref.bytes, ref.offset, ref.length));
+        if (source != null) {
+            BytesRef ref = source.toBytesRef();
+            if (recoverySource) {
+                document.add(new StoredField(SourceFieldMapper.RECOVERY_SOURCE_NAME, ref.bytes, ref.offset, ref.length));
+                document.add(new NumericDocValuesField(SourceFieldMapper.RECOVERY_SOURCE_NAME, 1));
+            } else {
+                document.add(new StoredField(SourceFieldMapper.NAME, ref.bytes, ref.offset, ref.length));
+            }
         }
         return new ParsedDocument(versionField, seqID, id, routing, Arrays.asList(document), source, MediaTypeRegistry.JSON, mappingUpdate);
     }
@@ -520,7 +533,17 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
     }
 
     protected Store createStore(final IndexSettings indexSettings, final Directory directory) throws IOException {
-        return new Store(shardId, indexSettings, directory, new DummyShardLock(shardId));
+        final Path path = createTempDir().resolve(shardId.getIndex().getUUID()).resolve(String.valueOf(shardId.id()));
+        final ShardPath shardPath = new ShardPath(false, path, path, shardId);
+        return new Store(
+            shardId,
+            indexSettings,
+            directory,
+            new DummyShardLock(shardId),
+            Store.OnClose.EMPTY,
+            shardPath,
+            new FsDirectoryFactory()
+        );
     }
 
     protected Translog createTranslog(LongSupplier primaryTermSupplier) throws IOException {
@@ -548,7 +571,9 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
             createTranslogDeletionPolicy(INDEX_SETTINGS),
             () -> SequenceNumbers.NO_OPS_PERFORMED,
             primaryTermSupplier,
-            seqNo -> {}
+            seqNo -> {},
+            TranslogOperationHelper.create(engine.config()),
+            null
         );
     }
 
@@ -991,7 +1016,11 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
     /**
      * Override config with ingestion engine configs
      */
-    protected EngineConfig config(EngineConfig config, Supplier<DocumentMapperForType> documentMapperForTypeSupplier) {
+    protected EngineConfig config(
+        EngineConfig config,
+        Supplier<DocumentMapperForType> documentMapperForTypeSupplier,
+        ClusterApplierService clusterApplierService
+    ) {
         IndexSettings indexSettings = IndexSettingsModule.newIndexSettings(
             "test",
             Settings.builder().put(config.getIndexSettings().getSettings()).build()
@@ -1019,6 +1048,8 @@ public abstract class EngineTestCase extends OpenSearchTestCase {
             .primaryTermSupplier(config.getPrimaryTermSupplier())
             .tombstoneDocSupplier(config.getTombstoneDocSupplier())
             .documentMapperForTypeSupplier(documentMapperForTypeSupplier)
+            .clusterApplierService(clusterApplierService)
+            .indexReaderWarmer(mock(MergedSegmentWarmer.class))
             .build();
     }
 

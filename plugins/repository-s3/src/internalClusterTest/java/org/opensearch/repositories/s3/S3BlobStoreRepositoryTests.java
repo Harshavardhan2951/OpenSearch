@@ -31,6 +31,8 @@
 
 package org.opensearch.repositories.s3;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -74,6 +76,9 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 import fixture.s3.S3HttpHandler;
@@ -84,6 +89,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 @SuppressForbidden(reason = "this test uses a HttpServer to emulate an S3 endpoint")
+@ThreadLeakFilters(filters = EventLoopThreadFilter.class)
 // Need to set up a new cluster for each test because cluster settings use randomized authentication settings
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST)
 public class S3BlobStoreRepositoryTests extends OpenSearchMockAPIBasedRepositoryIntegTestCase {
@@ -137,7 +143,7 @@ public class S3BlobStoreRepositoryTests extends OpenSearchMockAPIBasedRepository
 
     @Override
     protected HttpHandler createErroneousHttpHandler(final HttpHandler delegate) {
-        return new S3StatsCollectorHttpHandler(new S3ErroneousHttpHandler(delegate, randomIntBetween(2, 3)));
+        return new S3StatsCollectorHttpHandler(new S3ErroneousHttpHandler(delegate, randomDoubleBetween(0, 0.25, false)));
     }
 
     @Override
@@ -234,9 +240,13 @@ public class S3BlobStoreRepositoryTests extends OpenSearchMockAPIBasedRepository
      * S3RepositoryPlugin that allows to disable chunked encoding and to set a low threshold between single upload and multipart upload.
      */
     public static class TestS3RepositoryPlugin extends S3RepositoryPlugin {
-
         public TestS3RepositoryPlugin(final Settings settings, final Path configPath) {
-            super(settings, configPath);
+            super(
+                settings,
+                configPath,
+                new S3Service(configPath, Executors.newSingleThreadScheduledExecutor()),
+                new S3AsyncService(configPath, Executors.newSingleThreadScheduledExecutor())
+            );
         }
 
         @Override
@@ -244,6 +254,13 @@ public class S3BlobStoreRepositoryTests extends OpenSearchMockAPIBasedRepository
             final List<Setting<?>> settings = new ArrayList<>(super.getSettings());
             settings.add(S3ClientSettings.DISABLE_CHUNKED_ENCODING);
             return settings;
+        }
+
+        @Override
+        public void close() throws IOException {
+            super.close();
+            Stream.of(service.getClientExecutorService(), s3AsyncService.getClientExecutorService())
+                .forEach(e -> assertTrue(ThreadPool.terminate(e, 5, TimeUnit.SECONDS)));
         }
 
         @Override
@@ -332,8 +349,8 @@ public class S3BlobStoreRepositoryTests extends OpenSearchMockAPIBasedRepository
     @SuppressForbidden(reason = "this test uses a HttpServer to emulate an S3 endpoint")
     private static class S3ErroneousHttpHandler extends ErroneousHttpHandler {
 
-        S3ErroneousHttpHandler(final HttpHandler delegate, final int maxErrorsPerRequest) {
-            super(delegate, maxErrorsPerRequest);
+        S3ErroneousHttpHandler(final HttpHandler delegate, final double maxErrorsPercentage) {
+            super(delegate, maxErrorsPercentage);
         }
 
         @Override

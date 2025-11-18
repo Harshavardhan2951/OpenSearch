@@ -40,6 +40,7 @@ import org.apache.lucene.search.spell.LevenshteinDistance;
 import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.Constants;
 import org.bouncycastle.bcpg.ArmoredInputStream;
+import org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider;
 import org.bouncycastle.openpgp.PGPException;
 import org.bouncycastle.openpgp.PGPPublicKey;
 import org.bouncycastle.openpgp.PGPPublicKeyRingCollection;
@@ -90,6 +91,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.Security;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -397,7 +399,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
     @SuppressForbidden(reason = "Make HEAD request using URLConnection.connect()")
     boolean urlExists(Terminal terminal, String urlString) throws IOException {
         terminal.println(VERBOSE, "Checking if url exists: " + urlString);
-        URL url = new URL(urlString);
+        URL url = URI.create(urlString).toURL();
         assert "https".equals(url.getProtocol()) : "Use of https protocol is required";
         HttpURLConnection urlConnection = (HttpURLConnection) url.openConnection();
         urlConnection.addRequestProperty("User-Agent", "opensearch-plugin-installer");
@@ -425,7 +427,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
     @SuppressForbidden(reason = "We use getInputStream to download plugins")
     Path downloadZip(Terminal terminal, String urlString, Path tmpDir, boolean isBatch) throws IOException {
         terminal.println(VERBOSE, "Retrieving zip from " + urlString);
-        URL url = new URL(urlString);
+        URL url = URI.create(urlString).toURL();
         Path zip = Files.createTempFile(tmpDir, null, ".zip");
         URLConnection urlConnection = url.openConnection();
         urlConnection.addRequestProperty("User-Agent", "opensearch-plugin-installer");
@@ -602,7 +604,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
 
     /**
      * Verify the signature of the downloaded plugin ZIP. The signature is obtained from the source of the downloaded plugin by appending
-     * ".sig" to the URL. It is expected that the plugin is signed with the OpenSearch signing key with ID C2EE2AF6542C03B4.
+     * ".sig" to the URL. It is expected that the plugin is signed with the OpenSearch Release signing key with ID 4E9275EE6BA2427F for 3.0.0 or above.
      *
      * @param zip       the path to the downloaded plugin ZIP
      * @param urlString the URL source of the downloade plugin ZIP
@@ -632,6 +634,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
             // compute the signature of the downloaded plugin zip
             final PGPPublicKeyRingCollection collection = new PGPPublicKeyRingCollection(ain, new JcaKeyFingerprintCalculator());
             final PGPPublicKey key = collection.getPublicKey(signature.getKeyID());
+            Security.addProvider(new BouncyCastleFipsProvider());
             signature.init(new JcaPGPContentVerifierBuilderProvider().setProvider("BCFIPS"), key);
             final byte[] buffer = new byte[1024];
             int read;
@@ -663,7 +666,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
      * @return the public key ID
      */
     String getPublicKeyId() {
-        return "C2EE2AF6542C03B4";
+        return "4E9275EE6BA2427F";
     }
 
     /**
@@ -681,7 +684,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
      */
     // pkg private for tests
     URL openUrl(String urlString) throws IOException {
-        URL checksumUrl = new URL(urlString);
+        URL checksumUrl = URI.create(urlString).toURL();
         HttpURLConnection connection = (HttpURLConnection) checksumUrl.openConnection();
         if (connection.getResponseCode() == 404) {
             return null;
@@ -957,16 +960,13 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
 
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(tmpConfigDir)) {
             for (Path srcFile : stream) {
-                if (Files.isDirectory(srcFile)) {
-                    throw new UserException(PLUGIN_MALFORMED, "Directories not allowed in config dir for plugin " + info.getName());
-                }
-
                 Path destFile = destConfigDir.resolve(tmpConfigDir.relativize(srcFile));
                 if (Files.exists(destFile) == false) {
-                    Files.copy(srcFile, destFile);
-                    setFileAttributes(destFile, CONFIG_FILES_PERMS);
-                    if (destConfigDirAttributes != null) {
-                        setOwnerGroup(destFile, destConfigDirAttributes);
+                    if (Files.isDirectory(srcFile)) {
+                        copyWithPermissions(srcFile, destFile, CONFIG_DIR_PERMS, destConfigDirAttributes);
+                        copyDirectoryRecursively(srcFile, destFile, destConfigDirAttributes);
+                    } else {
+                        copyWithPermissions(srcFile, destFile, CONFIG_FILES_PERMS, destConfigDirAttributes);
                     }
                 }
             }
@@ -989,6 +989,42 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
         PosixFileAttributeView fileAttributeView = Files.getFileAttributeView(path, PosixFileAttributeView.class);
         if (fileAttributeView != null) {
             Files.setPosixFilePermissions(path, permissions);
+        }
+    }
+
+    /**
+     * Copies a file and sets permissions and ownership
+     */
+    private static void copyWithPermissions(
+        Path srcFile,
+        Path destFile,
+        Set<PosixFilePermission> permissions,
+        PosixFileAttributes attributes
+    ) throws IOException {
+        Files.copy(srcFile, destFile);
+        setFileAttributes(destFile, permissions);
+        if (attributes != null) {
+            setOwnerGroup(destFile, attributes);
+        }
+    }
+
+    /**
+     * Recursively copies directory contents from source to destination.
+     */
+    private static void copyDirectoryRecursively(Path srcDir, Path destDir, PosixFileAttributes destConfigDirAttributes)
+        throws IOException {
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(srcDir)) {
+            for (Path srcFile : stream) {
+                Path destFile = destDir.resolve(srcDir.relativize(srcFile));
+                if (Files.exists(destFile) == false) {
+                    if (Files.isDirectory(srcFile)) {
+                        copyWithPermissions(srcFile, destFile, CONFIG_DIR_PERMS, destConfigDirAttributes);
+                        copyDirectoryRecursively(srcFile, destFile, destConfigDirAttributes);
+                    } else {
+                        copyWithPermissions(srcFile, destFile, CONFIG_FILES_PERMS, destConfigDirAttributes);
+                    }
+                }
+            }
         }
     }
 

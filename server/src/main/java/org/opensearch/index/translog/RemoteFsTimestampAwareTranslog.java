@@ -75,7 +75,9 @@ public class RemoteFsTimestampAwareTranslog extends RemoteFsTranslog {
         ThreadPool threadPool,
         BooleanSupplier startedPrimarySupplier,
         RemoteTranslogTransferTracker remoteTranslogTransferTracker,
-        RemoteStoreSettings remoteStoreSettings
+        RemoteStoreSettings remoteStoreSettings,
+        TranslogOperationHelper translogOperationHelper,
+        boolean isServerSideEncryptionEnabled
     ) throws IOException {
         super(
             config,
@@ -88,7 +90,10 @@ public class RemoteFsTimestampAwareTranslog extends RemoteFsTranslog {
             threadPool,
             startedPrimarySupplier,
             remoteTranslogTransferTracker,
-            remoteStoreSettings
+            remoteStoreSettings,
+            translogOperationHelper,
+            null,
+            isServerSideEncryptionEnabled
         );
         logger = Loggers.getLogger(getClass(), shardId);
         this.metadataFilePinnedTimestampMap = new HashMap<>();

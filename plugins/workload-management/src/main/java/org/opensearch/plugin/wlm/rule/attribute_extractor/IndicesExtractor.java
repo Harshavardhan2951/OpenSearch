@@ -9,10 +9,13 @@
 package org.opensearch.plugin.wlm.rule.attribute_extractor;
 
 import org.opensearch.action.IndicesRequest;
-import org.opensearch.autotagging.Attribute;
+import org.opensearch.rule.RuleAttribute;
 import org.opensearch.rule.attribute_extractor.AttributeExtractor;
+import org.opensearch.rule.autotagging.Attribute;
 
 import java.util.List;
+
+import static org.opensearch.rule.attribute_extractor.AttributeExtractor.LogicalOperator.AND;
 
 /**
  * This class extracts the indices from a request
@@ -30,12 +33,16 @@ public class IndicesExtractor implements AttributeExtractor<String> {
 
     @Override
     public Attribute getAttribute() {
-        // TODO: this will be replaced by WLM defined index_pattern attribute
-        return null;
+        return RuleAttribute.INDEX_PATTERN;
     }
 
     @Override
     public Iterable<String> extract() {
         return List.of(indicesRequest.indices());
+    }
+
+    @Override
+    public LogicalOperator getLogicalOperator() {
+        return AND;
     }
 }

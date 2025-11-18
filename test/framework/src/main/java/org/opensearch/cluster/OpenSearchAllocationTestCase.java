@@ -142,6 +142,21 @@ public abstract class OpenSearchAllocationTestCase extends OpenSearchTestCase {
         );
     }
 
+    public static MockAllocationService createAllocationService(
+        Settings settings,
+        ClusterSettings clusterSettings,
+        GatewayAllocator gatewayAllocator,
+        SnapshotsInfoService snapshotsInfoService
+    ) {
+        return new MockAllocationService(
+            randomAllocationDeciders(settings, EMPTY_CLUSTER_SETTINGS, random()),
+            gatewayAllocator,
+            new BalancedShardsAllocator(settings, clusterSettings),
+            EmptyClusterInfoService.INSTANCE,
+            snapshotsInfoService
+        );
+    }
+
     public static AllocationDeciders randomAllocationDeciders(Settings settings, ClusterSettings clusterSettings, Random random) {
         List<AllocationDecider> deciders = new ArrayList<>(
             ClusterModule.createAllocationDeciders(settings, clusterSettings, Collections.emptyList())
@@ -172,6 +187,10 @@ public abstract class OpenSearchAllocationTestCase extends OpenSearchTestCase {
 
     protected static DiscoveryNode newSearchNode(String nodeId, Map<String, String> attributes) {
         return new DiscoveryNode(nodeId, buildNewFakeTransportAddress(), attributes, SEARCH_ROLE, Version.CURRENT);
+    }
+
+    protected static DiscoveryNode newSearchNode(String nodeName, String nodeId, Map<String, String> attributes) {
+        return new DiscoveryNode(nodeName, nodeId, buildNewFakeTransportAddress(), attributes, SEARCH_ROLE, Version.CURRENT);
     }
 
     protected static DiscoveryNode newNode(String nodeName, String nodeId, Map<String, String> attributes) {

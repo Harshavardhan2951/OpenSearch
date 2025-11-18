@@ -45,7 +45,6 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
-import org.opensearch.common.util.FeatureFlags;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
@@ -1089,7 +1088,7 @@ public class OperationRoutingTests extends OpenSearchTestCase {
                 .settings(
                     Settings.builder()
                         .put(state.metadata().index(indexName).getSettings())
-                        .put(IndexModule.INDEX_STORE_LOCALITY_SETTING.getKey(), IndexModule.DataLocalityType.PARTIAL)
+                        .put(IndexModule.IS_WARM_INDEX_SETTING.getKey(), true)
                         .build()
                 )
                 .build();
@@ -1132,7 +1131,7 @@ public class OperationRoutingTests extends OpenSearchTestCase {
 
         try {
             OperationRouting opRouting = new OperationRouting(
-                Settings.builder().put(FeatureFlags.READER_WRITER_SPLIT_EXPERIMENTAL, "true").build(),
+                Settings.builder().build(),
                 new ClusterSettings(Settings.EMPTY, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS)
             );
 
@@ -1208,7 +1207,7 @@ public class OperationRoutingTests extends OpenSearchTestCase {
 
         try {
             OperationRouting opRouting = new OperationRouting(
-                Settings.builder().put(FeatureFlags.READER_WRITER_SPLIT_EXPERIMENTAL, "true").build(),
+                Settings.builder().build(),
                 new ClusterSettings(Settings.EMPTY, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS)
             );
             opRouting.setStrictSearchOnlyShardRouting(false);
@@ -1256,7 +1255,7 @@ public class OperationRoutingTests extends OpenSearchTestCase {
                 assertEquals("We should have all 6 shards returned", shardIterator.size(), 6);
                 for (ShardRouting shardRouting : shardIterator) {
                     assertTrue(
-                        "Any shard can exist with when cluster.routing.search_only.strict is set as false",
+                        "Any shard can exist with when cluster.routing.search_replica.strict is set as false",
                         shardRouting.isSearchOnly() || shardRouting.primary() || shardRouting.isSearchOnly() == false
                     );
                 }
