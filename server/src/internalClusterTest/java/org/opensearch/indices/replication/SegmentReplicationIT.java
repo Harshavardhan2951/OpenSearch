@@ -16,15 +16,18 @@ import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.Fields;
+import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.StandardDirectoryReader;
+import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.BytesRef;
 import org.opensearch.action.admin.cluster.stats.ClusterStatsResponse;
 import org.opensearch.action.admin.indices.alias.Alias;
 import org.opensearch.action.admin.indices.flush.FlushRequest;
+import org.opensearch.action.admin.indices.forcemerge.ForceMergeRequest;
 import org.opensearch.action.admin.indices.forcemerge.ForceMergeResponse;
 import org.opensearch.action.admin.indices.stats.IndicesStatsRequest;
 import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
@@ -54,6 +57,7 @@ import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.routing.ShardRoutingState;
 import org.opensearch.cluster.routing.allocation.command.CancelAllocationCommand;
 import org.opensearch.common.action.ActionFuture;
+import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
 import org.opensearch.common.settings.Settings;
@@ -136,6 +140,109 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         return randomBoolean() ? INDEX_NAME : "alias";
     }
 
+    public void testAcquireLastIndexCommit() throws Exception {
+        final String primaryNode = internalCluster().startDataOnlyNode();
+        createIndex(INDEX_NAME);
+        ensureYellowAndNoInitializingShards(INDEX_NAME);
+        final String replicaNode = internalCluster().startDataOnlyNode();
+        ensureGreen(INDEX_NAME);
+
+        // generate _0.si
+        client().prepareIndex(INDEX_NAME)
+            .setId(String.valueOf(1))
+            .setSource("foo", "bar")
+            .setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE)
+            .get();
+
+        // generate _1.si
+        client().prepareIndex(INDEX_NAME)
+            .setId(String.valueOf(2))
+            .setSource("foo2", "bar2")
+            .setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE)
+            .get();
+
+        waitForSearchableDocs(2, primaryNode, replicaNode);
+
+        // primary and replica generate index commit
+        IndexShard primaryShard = getIndexShard(primaryNode, INDEX_NAME);
+        primaryShard.flush(new FlushRequest(INDEX_NAME));
+        IndexShard replicaShard = getIndexShard(replicaNode, INDEX_NAME);
+        replicaShard.flush(new FlushRequest(INDEX_NAME));
+
+        logger.info("primary {} acquire last IndexCommit", primaryShard.shardId());
+        GatedCloseable<IndexCommit> primaryIndexCommit = primaryShard.acquireLastIndexCommit(false);
+
+        logger.info("replica {} acquire last IndexCommit", replicaShard.shardId());
+        GatedCloseable<IndexCommit> replicaIndexCommit = replicaShard.acquireLastIndexCommit(false);
+
+        logger.info("Verify that before merge, primary and replica contain _0.si and _1.si");
+        Directory primaryDirectory = primaryShard.store().directory();
+        Set<String> primaryFilesBeforeMerge = Sets.newHashSet(primaryDirectory.listAll());
+        logger.info("primaryFilesBeforeMerge {}: {}", primaryFilesBeforeMerge.size(), primaryFilesBeforeMerge);
+        assertTrue(
+            primaryFilesBeforeMerge.stream().anyMatch(s -> s.startsWith("_0"))
+                && primaryFilesBeforeMerge.stream().anyMatch(s -> s.startsWith("_1"))
+        );
+
+        Directory replicaDirectory = replicaShard.store().directory();
+        Set<String> replicaFilesBeforeMerge = Sets.newHashSet(replicaDirectory.listAll());
+        logger.info("replicaFilesBeforeMerge {}: {}", replicaFilesBeforeMerge.size(), replicaFilesBeforeMerge);
+        assertTrue(
+            replicaFilesBeforeMerge.stream().anyMatch(s -> s.startsWith("_0"))
+                && replicaFilesBeforeMerge.stream().anyMatch(s -> s.startsWith("_1"))
+        );
+
+        // generate _2.si
+        client().admin().indices().forceMerge(new ForceMergeRequest(INDEX_NAME).maxNumSegments(1));
+        waitForSegmentCount(INDEX_NAME, 1, logger);
+        primaryShard.flush(new FlushRequest(INDEX_NAME));
+        replicaShard.flush(new FlushRequest(INDEX_NAME));
+
+        logger.info("Verify that after merge, primary and replica contain _0.si, _1.si and _2.si");
+        Set<String> primaryFilesAfterMerge = Sets.newHashSet(primaryDirectory.listAll());
+        logger.info("primaryFilesAfterMerge {}: {}", primaryFilesAfterMerge.size(), primaryFilesAfterMerge);
+        assertTrue(
+            primaryFilesAfterMerge.stream().anyMatch(s -> s.startsWith("_0"))
+                && primaryFilesAfterMerge.stream().anyMatch(s -> s.startsWith("_1"))
+                && primaryFilesAfterMerge.stream().anyMatch(s -> s.startsWith("_2"))
+        );
+
+        Set<String> replicaFilesAfterMerge = Sets.newHashSet(replicaDirectory.listAll());
+        logger.info("replicaFilesAfterMerge {}: {}", replicaFilesAfterMerge.size(), replicaFilesAfterMerge);
+        assertTrue(
+            replicaFilesAfterMerge.stream().anyMatch(s -> s.startsWith("_0"))
+                && replicaFilesAfterMerge.stream().anyMatch(s -> s.startsWith("_1"))
+                && replicaFilesAfterMerge.stream().anyMatch(s -> s.startsWith("_2"))
+        );
+
+        logger.info("Verify that after close index commit, primary and replica only contain _2.si");
+        primaryIndexCommit.close();
+        Set<String> primaryFilesAfterIndexCommitClose = Sets.newHashSet(primaryDirectory.listAll());
+        logger.info(
+            "primaryFilesAfterIndexCommitClose {}: {}",
+            primaryFilesAfterIndexCommitClose.size(),
+            primaryFilesAfterIndexCommitClose
+        );
+        assertTrue(
+            primaryFilesAfterIndexCommitClose.stream().noneMatch(s -> s.startsWith("_0"))
+                && primaryFilesAfterIndexCommitClose.stream().noneMatch(s -> s.startsWith("_1"))
+                && primaryFilesAfterIndexCommitClose.stream().anyMatch(s -> s.startsWith("_2"))
+        );
+
+        replicaIndexCommit.close();
+        Set<String> replicaFilesAfterIndexCommitClose = Sets.newHashSet(replicaDirectory.listAll());
+        logger.info(
+            "replicaFilesAfterIndexCommitClose {}: {}",
+            replicaFilesAfterIndexCommitClose.size(),
+            replicaFilesAfterIndexCommitClose
+        );
+        assertTrue(
+            replicaFilesAfterIndexCommitClose.stream().noneMatch(s -> s.startsWith("_0"))
+                && replicaFilesAfterIndexCommitClose.stream().noneMatch(s -> s.startsWith("_1"))
+                && replicaFilesAfterIndexCommitClose.stream().anyMatch(s -> s.startsWith("_2"))
+        );
+    }
+
     public void testRetryPublishCheckPoint() throws Exception {
         // Reproduce the case where the replica shard cannot synchronize data from the primary shard when there is a network exception.
         // Test update of configuration PublishCheckpointAction#PUBLISH_CHECK_POINT_RETRY_TIMEOUT.
@@ -198,8 +305,11 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
 
         waitForSearchableDocs(1, primary, replica);
 
-        // index another doc but don't refresh, we will ensure this is searchable once replica is promoted.
-        client().prepareIndex(INDEX_NAME).setId("2").setSource("bar", "baz").setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
+        // index another doc but don't refresh, it should become searchable once the replica is promoted and refreshed there.
+        client().prepareIndex(INDEX_NAME).setId("2").setSource("bar", "baz").setRefreshPolicy(WriteRequest.RefreshPolicy.NONE).get();
+
+        // make sure doc 2 is on the replica realtime GET reads from translog, not search
+        assertBusy(() -> assertTrue(client(replica).prepareGet(INDEX_NAME, "2").setRealtime(true).get().isExists()));
 
         // stop the primary node - we only have one shard on here.
         internalCluster().stopRandomNode(InternalTestCluster.nameFilter(primary));
@@ -212,8 +322,12 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         // new primary should have at least the doc count from the first set of segments.
         assertTrue(response.getHits().getTotalHits().value() >= 1);
 
-        // assert we can index into the new primary.
-        client().prepareIndex(INDEX_NAME).setId("3").setSource("bar", "baz").setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
+        // assert we can index into the new primary and refresh there, making doc2 searchable too.
+        client(replica).prepareIndex(INDEX_NAME)
+            .setId("3")
+            .setSource("bar", "baz")
+            .setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE)
+            .get();
         assertHitCount(client(replica).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 3);
 
         // start another node, index another doc and replicate.

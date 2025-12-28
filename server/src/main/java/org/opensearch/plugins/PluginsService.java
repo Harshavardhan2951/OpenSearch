@@ -64,8 +64,6 @@ import java.net.URLClassLoader;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.AccessController;
-import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -625,9 +623,9 @@ public class PluginsService implements ReportingService<PluginsAndModules> {
             .flatMap(t -> t.v1().getExtendedPlugins().stream().map(extendedPlugin -> Tuple.tuple(extendedPlugin, t.v2())))
             .collect(Collectors.groupingBy(Tuple::v1, Collectors.mapping(Tuple::v2, Collectors.toList())));
         for (Tuple<PluginInfo, Plugin> pluginTuple : plugins) {
-            if (pluginTuple.v2() instanceof ExtensiblePlugin) {
+            if (pluginTuple.v2() instanceof ExtensiblePlugin extensiblePlugin) {
                 loadExtensionsForPlugin(
-                    (ExtensiblePlugin) pluginTuple.v2(),
+                    extensiblePlugin,
                     extendingPluginsByName.getOrDefault(pluginTuple.v1().getName(), Collections.emptyList())
                 );
             }
@@ -730,8 +728,11 @@ public class PluginsService implements ReportingService<PluginsAndModules> {
                 Set<URL> intersection = new HashSet<>(urls);
                 intersection.retainAll(pluginUrls);
                 if (intersection.isEmpty() == false) {
-                    throw new IllegalStateException(
-                        "jar hell! extended plugins " + exts + " have duplicate codebases with each other: " + intersection
+                    logger.info(
+                        "Plugin [{}] extends multiple plugins/modules that share common dependencies: {}. "
+                            + "This is expected when extended plugins share common ancestors.",
+                        bundle.plugin.getName(),
+                        intersection
                     );
                 }
 
@@ -799,10 +800,7 @@ public class PluginsService implements ReportingService<PluginsAndModules> {
             // Set context class loader to plugin's class loader so that plugins
             // that have dependencies with their own SPI endpoints have a chance to load
             // and initialize them appropriately.
-            AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
-                Thread.currentThread().setContextClassLoader(loader);
-                return null;
-            });
+            Thread.currentThread().setContextClassLoader(loader);
 
             logger.debug("Loading plugin [" + name + "]...");
             Class<? extends Plugin> pluginClass = loadPluginClass(bundle.plugin.getClassname(), loader);
@@ -821,10 +819,7 @@ public class PluginsService implements ReportingService<PluginsAndModules> {
             loaded.put(name, plugin);
             return plugin;
         } finally {
-            AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
-                Thread.currentThread().setContextClassLoader(cl);
-                return null;
-            });
+            Thread.currentThread().setContextClassLoader(cl);
         }
     }
 

@@ -55,6 +55,7 @@ import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.BigArrays;
+import org.opensearch.core.common.unit.ByteSizeValue;
 import org.opensearch.core.concurrency.OpenSearchRejectedExecutionException;
 import org.opensearch.index.IndexService;
 import org.opensearch.index.IndexSettings;
@@ -75,6 +76,8 @@ import org.opensearch.index.similarity.SimilarityService;
 import org.opensearch.search.aggregations.BucketCollectorProcessor;
 import org.opensearch.search.aggregations.InternalAggregation;
 import org.opensearch.search.aggregations.SearchContextAggregations;
+import org.opensearch.search.aggregations.metrics.CardinalityAggregationContext;
+import org.opensearch.search.aggregations.metrics.CardinalityAggregator;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.search.collapse.CollapseContext;
 import org.opensearch.search.deciders.ConcurrentSearchDecision;
@@ -103,6 +106,7 @@ import org.opensearch.search.query.ReduceableSearchResult;
 import org.opensearch.search.rescore.RescoreContext;
 import org.opensearch.search.slice.SliceBuilder;
 import org.opensearch.search.sort.SortAndFormats;
+import org.opensearch.search.streaming.FlushMode;
 import org.opensearch.search.suggest.SuggestionSearchContext;
 
 import java.io.IOException;
@@ -130,6 +134,9 @@ import static org.opensearch.search.SearchService.CONCURRENT_SEGMENT_SEARCH_MODE
 import static org.opensearch.search.SearchService.CONCURRENT_SEGMENT_SEARCH_MODE_NONE;
 import static org.opensearch.search.SearchService.KEYWORD_INDEX_OR_DOC_VALUES_ENABLED;
 import static org.opensearch.search.SearchService.MAX_AGGREGATION_REWRITE_FILTERS;
+import static org.opensearch.search.streaming.FlushModeResolver.STREAMING_MAX_ESTIMATED_BUCKET_COUNT;
+import static org.opensearch.search.streaming.FlushModeResolver.STREAMING_MIN_CARDINALITY_RATIO;
+import static org.opensearch.search.streaming.FlushModeResolver.STREAMING_MIN_ESTIMATED_BUCKET_COUNT;
 
 /**
  * The main search context used during search phase
@@ -216,11 +223,13 @@ final class DefaultSearchContext extends SearchContext {
     private final int maxAggRewriteFilters;
     private final int filterRewriteSegmentThreshold;
     private final int cardinalityAggregationPruningThreshold;
+    private final CardinalityAggregationContext cardinalityAggregationContext;
     private final int bucketSelectionStrategyFactor;
     private final boolean keywordIndexOrDocValuesEnabled;
 
-    private final boolean isStreamSearch;
+    private boolean isStreamSearch;
     private StreamSearchChannelListener listener;
+    private final SetOnce<FlushMode> cachedFlushMode = new SetOnce<>();
 
     DefaultSearchContext(
         ReaderContext readerContext,
@@ -282,6 +291,7 @@ final class DefaultSearchContext extends SearchContext {
         this.maxAggRewriteFilters = evaluateFilterRewriteSetting();
         this.filterRewriteSegmentThreshold = evaluateAggRewriteFilterSegThreshold();
         this.cardinalityAggregationPruningThreshold = evaluateCardinalityAggregationPruningThreshold();
+        this.cardinalityAggregationContext = evaluateCardinalityAggregationContext();
         this.bucketSelectionStrategyFactor = evaluateBucketSelectionStrategyFactor();
         this.concurrentSearchDeciderFactories = concurrentSearchDeciderFactories;
         this.keywordIndexOrDocValuesEnabled = evaluateKeywordIndexOrDocValuesEnabled();
@@ -1234,6 +1244,11 @@ final class DefaultSearchContext extends SearchContext {
     }
 
     @Override
+    public CardinalityAggregationContext cardinalityAggregationContext() {
+        return cardinalityAggregationContext;
+    }
+
+    @Override
     public int bucketSelectionStrategyFactor() {
         return bucketSelectionStrategyFactor;
     }
@@ -1248,6 +1263,17 @@ final class DefaultSearchContext extends SearchContext {
             return clusterService.getClusterSettings().get(CARDINALITY_AGGREGATION_PRUNING_THRESHOLD);
         }
         return 0;
+    }
+
+    private CardinalityAggregationContext evaluateCardinalityAggregationContext() {
+        if (clusterService != null) {
+            boolean hybridCollectorEnabled = clusterService.getClusterSettings()
+                .get(CardinalityAggregator.CARDINALITY_AGGREGATION_HYBRID_COLLECTOR_ENABLED);
+            ByteSizeValue memoryThreshold = clusterService.getClusterSettings()
+                .get(CardinalityAggregator.CARDINALITY_AGGREGATION_HYBRID_COLLECTOR_MEMORY_THRESHOLD);
+            return CardinalityAggregationContext.from(hybridCollectorEnabled, memoryThreshold);
+        }
+        return new CardinalityAggregationContext(false, Runtime.getRuntime().maxMemory() / 100);
     }
 
     private int evaluateBucketSelectionStrategyFactor() {
@@ -1276,5 +1302,34 @@ final class DefaultSearchContext extends SearchContext {
 
     public boolean isStreamSearch() {
         return isStreamSearch;
+    }
+
+    /**
+     * Disables streaming for this search context.
+     * Used when streaming cost analysis determines traditional processing is more efficient.
+     */
+    @Override
+    public FlushMode getFlushMode() {
+        return cachedFlushMode.get();
+    }
+
+    @Override
+    public boolean setFlushModeIfAbsent(FlushMode flushMode) {
+        return cachedFlushMode.trySet(flushMode);
+    }
+
+    @Override
+    public long getStreamingMaxEstimatedBucketCount() {
+        return clusterService.getClusterSettings().get(STREAMING_MAX_ESTIMATED_BUCKET_COUNT);
+    }
+
+    @Override
+    public double getStreamingMinCardinalityRatio() {
+        return clusterService.getClusterSettings().get(STREAMING_MIN_CARDINALITY_RATIO);
+    }
+
+    @Override
+    public long getStreamingMinEstimatedBucketCount() {
+        return clusterService.getClusterSettings().get(STREAMING_MIN_ESTIMATED_BUCKET_COUNT);
     }
 }
